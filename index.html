@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tinker — browser IDE</title>
+
+<!-- IMPORTANT: load xterm + pyodide BEFORE Monaco's AMD loader, otherwise their
+     UMD wrappers see define.amd and never set their globals. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs/loader.js"></script>
+
+<style>
+  :root {
+    --bg:      #14171c;
+    --bg-2:    #1a1e24;
+    --bg-3:    #21262e;
+    --border:  #2b323b;
+    --text:    #e6e3da;
+    --dim:     #8b93a0;
+    --faint:   #5a626d;
+    --accent:  #e8a94b;  /* amber — a nod to old CRT phosphor */
+    --cyan:    #6fb3c9;
+    --danger:  #d9705f;
+    --ok:      #7fb37a;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------- top bar ---------- */
+  #topbar {
+    display: flex; align-items: center; gap: 16px;
+    height: 46px; padding: 0 14px; flex: 0 0 auto;
+    background: var(--bg-2); border-bottom: 1px solid var(--border);
+  }
+  .wordmark {
+    font-family: var(--mono); font-weight: 600; letter-spacing: .5px;
+    font-size: 15px; display: flex; align-items: center; gap: 2px; user-select: none;
+  }
+  .wordmark .cursor {
+    display: inline-block; width: 8px; height: 15px; margin-left: 3px;
+    background: var(--accent); transform: translateY(1px);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .wordmark .cursor { animation: blink 1.1s step-end infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+  }
+
+  .topbar-spacer { flex: 1; }
+
+  .proj-select {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg-3); border: 1px solid var(--border); border-radius: 7px;
+    padding: 5px 8px 5px 11px; font-family: var(--mono); font-size: 12.5px;
+  }
+  .proj-select label { color: var(--faint); }
+  .proj-select select {
+    background: transparent; border: 0; color: var(--text);
+    font-family: var(--mono); font-size: 12.5px; padding: 0 2px; cursor: pointer;
+  }
+  .proj-select select:focus { outline: none; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); background: var(--bg-3); color: var(--text);
+    border-radius: 7px; padding: 6px 11px; font-size: 12.5px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: #3a424d; background: #262c35; }
+  .btn.primary {
+    background: var(--accent); color: #14171c; border-color: var(--accent); font-weight: 600;
+  }
+  .btn.primary:hover { filter: brightness(1.07); background: var(--accent); }
+  .btn:disabled { opacity: .5; cursor: default; }
+
+  /* ---------- main split ---------- */
+  #main { flex: 1; display: flex; min-height: 0; }
+
+  /* sidebar */
+  #sidebar {
+    flex: 0 0 210px; display: flex; flex-direction: column;
+    background: var(--bg-2); border-right: 1px solid var(--border);
+  }
+  .side-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; color: var(--faint); font-size: 11px;
+    letter-spacing: .8px; text-transform: uppercase; font-family: var(--mono);
+  }
+  .icon-btn {
+    background: transparent; border: 0; color: var(--dim); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 2px 5px; border-radius: 5px;
+  }
+  .icon-btn:hover { color: var(--text); background: var(--bg-3); }
+  #file-list { flex: 1; overflow-y: auto; padding: 2px 6px 10px; }
+  .file-row {
+    display: flex; align-items: center; gap: 7px;
+    padding: 5px 8px; border-radius: 6px; cursor: pointer;
+    font-family: var(--mono); font-size: 12.5px; color: var(--dim);
+  }
+  .file-row:hover { background: var(--bg-3); color: var(--text); }
+  .file-row.active { background: #262c35; color: var(--text); }
+  .file-row .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-row .del {
+    opacity: 0; border: 0; background: transparent; color: var(--faint);
+    cursor: pointer; font-size: 14px; padding: 0 2px; border-radius: 4px;
+  }
+  .file-row:hover .del { opacity: 1; }
+  .file-row .del:hover { color: var(--danger); }
+  .dot-ext { width: 6px; height: 6px; border-radius: 2px; flex: 0 0 auto; background: var(--faint); }
+  .ext-py  { background: var(--accent); }
+  .ext-html{ background: var(--danger); }
+  .ext-js  { background: var(--cyan); }
+  .ext-css { background: #a888d8; }
+
+  /* editor column */
+  #editor-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  #tabs {
+    display: flex; align-items: stretch; height: 36px; flex: 0 0 auto;
+    background: var(--bg-2); border-bottom: 1px solid var(--border); overflow-x: auto;
+  }
+  .tab {
+    display: flex; align-items: center; gap: 8px; padding: 0 12px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--dim);
+    border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap;
+    background: var(--bg-2);
+  }
+  .tab.active { background: var(--bg); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+  .tab .x { border: 0; background: transparent; color: var(--faint); cursor: pointer; font-size: 14px; border-radius: 4px; padding: 0 2px; }
+  .tab .x:hover { color: var(--text); }
+
+  #editor { flex: 1; min-height: 0; }
+  #editor.empty { display: grid; place-items: center; color: var(--faint); font-family: var(--mono); font-size: 13px; }
+
+  /* horizontal divider */
+  #divider {
+    height: 6px; flex: 0 0 auto; cursor: row-resize; background: var(--bg);
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  #divider:hover { background: var(--bg-3); }
+
+  /* bottom panel */
+  #panel { flex: 0 0 240px; display: flex; flex-direction: column; min-height: 90px; background: var(--bg); }
+  #panel-tabs {
+    display: flex; align-items: center; height: 34px; flex: 0 0 auto;
+    background: var(--bg-2); border-bottom: 1px solid var(--border);
+  }
+  .ptab {
+    padding: 0 14px; height: 100%; display: flex; align-items: center;
+    font-family: var(--mono); font-size: 12px; color: var(--dim); cursor: pointer;
+    border-right: 1px solid var(--border); letter-spacing: .3px;
+  }
+  .ptab.active { color: var(--text); background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent); }
+  .ptab-spacer { flex: 1; }
+  .ptab-btn { margin-right: 8px; }
+
+  #panel-body { flex: 1; min-height: 0; position: relative; }
+  .pane { position: absolute; inset: 0; display: none; }
+  .pane.active { display: block; }
+
+  #console-out {
+    height: 100%; overflow-y: auto; padding: 8px 12px; margin: 0;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word; color: var(--text);
+  }
+  #console-out .err { color: var(--danger); }
+  #console-out .muted { color: var(--faint); }
+  #term-host { height: 100%; padding: 6px 4px 4px 10px; }
+  .xterm { height: 100%; }
+  #preview-frame { width: 100%; height: 100%; border: 0; background: #fff; }
+
+  /* status bar */
+  #statusbar {
+    display: flex; align-items: center; gap: 14px; flex: 0 0 auto;
+    height: 24px; padding: 0 12px; font-family: var(--mono); font-size: 11.5px;
+    background: var(--bg-2); border-top: 1px solid var(--border); color: var(--dim);
+  }
+  #statusbar .sb-spacer { flex: 1; }
+  .sb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); display: inline-block; margin-right: 6px; }
+  .sb-dot.loading { background: var(--accent); }
+  .sb-dot.ready { background: var(--ok); }
+  @media (prefers-reduced-motion: no-preference) {
+    .sb-dot.loading { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .35; } }
+  }
+  #save-state.warn { color: var(--accent); }
+
+  /* modal */
+  #modal-scrim {
+    position: fixed; inset: 0; background: rgba(8,10,13,.62); display: none;
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  #modal-scrim.show { display: flex; }
+  .modal {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px;
+    width: 380px; max-width: calc(100vw - 32px); padding: 20px; box-shadow: 0 24px 60px rgba(0,0,0,.5);
+  }
+  .modal h2 { margin: 0 0 4px; font-size: 15px; font-family: var(--mono); }
+  .modal p { margin: 0 0 14px; color: var(--dim); font-size: 12.5px; }
+  .modal label { display: block; font-size: 11px; color: var(--faint); font-family: var(--mono); text-transform: uppercase; letter-spacing: .6px; margin: 12px 0 6px; }
+  .modal input[type=text] {
+    width: 100%; background: var(--bg-3); border: 1px solid var(--border); border-radius: 7px;
+    padding: 9px 10px; color: var(--text); font-family: var(--mono); font-size: 13px;
+  }
+  .chips { display: flex; gap: 8px; }
+  .chip {
+    flex: 1; text-align: center; padding: 9px 6px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg-3); font-family: var(--mono); font-size: 12px; color: var(--dim);
+  }
+  .chip.sel { border-color: var(--accent); color: var(--text); background: #2a2519; }
+  .chip small { display: block; color: var(--faint); font-size: 10px; margin-top: 2px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2b323b; border-radius: 6px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #3a424d; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div class="wordmark">tinker<span class="cursor"></span></div>
+    <div class="proj-select">
+      <label>project</label>
+      <select id="proj-picker" title="Switch project"></select>
+    </div>
+    <button class="btn" id="new-proj-btn">+ New project</button>
+    <div class="topbar-spacer"></div>
+    <button class="btn primary" id="run-btn" title="Run (Ctrl/Cmd + Enter)">▶ Run</button>
+  </div>
+
+  <div id="main">
+    <div id="sidebar">
+      <div class="side-head">
+        <span>Files</span>
+        <button class="icon-btn" id="new-file-btn" title="New file">＋</button>
+      </div>
+      <div id="file-list"></div>
+    </div>
+
+    <div id="editor-col">
+      <div id="tabs"></div>
+      <div id="editor" class="empty">Loading editor…</div>
+      <div id="divider"></div>
+      <div id="panel">
+        <div id="panel-tabs">
+          <div class="ptab active" data-pane="console">Console</div>
+          <div class="ptab" data-pane="terminal">Terminal</div>
+          <div class="ptab" data-pane="preview">Preview</div>
+          <div class="ptab-spacer"></div>
+          <button class="icon-btn ptab-btn" id="clear-console-btn" title="Clear console">⌫</button>
+        </div>
+        <div id="panel-body">
+          <div class="pane active" data-pane="console"><div id="console-out"><span class="muted">Run a Python file to see output here.</span></div></div>
+          <div class="pane" data-pane="terminal"><div id="term-host"></div></div>
+          <div class="pane" data-pane="preview"><iframe id="preview-frame" sandbox="allow-scripts allow-modals"></iframe></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="statusbar">
+    <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
+    <span class="sb-spacer"></span>
+    <span id="cursor-pos"></span>
+    <span id="save-state">—</span>
+  </div>
+</div>
+
+<div id="modal-scrim"><div class="modal" id="modal-box"></div></div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ======================= templates ======================= */
+  const T = {};
+  T.python =
+`# main.py — your Python entry point
+# Press Run (Ctrl/Cmd + Enter) or type:  python main.py
+
+def greet(name):
+    return f"Hello, {name}!"
+
+def main():
+    print(greet("world"))
+    for i in range(1, 6):
+        print(f"{i} squared is {i * i}")
+
+if __name__ == "__main__":
+    main()
+`;
+  T.webHtml =
+`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Web Project</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <h1>It works.</h1>
+    <p>Edit the files on the left, then press Run.</p>
+    <button id="tapBtn">Tap me</button>
+    <p id="count">0 taps</p>
+  </main>
+  <script src="script.js"><\/script>
+</body>
+</html>
+`;
+  T.webCss =
+`:root { color-scheme: dark; }
+body {
+  margin: 0; min-height: 100vh; display: grid; place-items: center;
+  font-family: system-ui, sans-serif; background: #14171c; color: #e6e3da;
+}
+h1 { color: #e8a94b; margin-bottom: .3rem; }
+button {
+  font: inherit; padding: .55rem 1.1rem; border: 0; border-radius: 8px;
+  background: #e8a94b; color: #14171c; cursor: pointer;
+}
+button:hover { filter: brightness(1.08); }
+`;
+  T.webJs =
+`let taps = 0;
+const btn = document.getElementById("tapBtn");
+const count = document.getElementById("count");
+btn.addEventListener("click", () => {
+  taps += 1;
+  count.textContent = taps + (taps === 1 ? " tap" : " taps");
+});
+`;
+
+  function templateFiles(kind) {
+    if (kind === "web") return { "index.html": T.webHtml, "style.css": T.webCss, "script.js": T.webJs };
+    if (kind === "blank") return { "main.py": "# start here\n" };
+    return { "main.py": T.python };
+  }
+
+  /* ======================= state ======================= */
+  let ws = null;                 // { projects: {name:{type,files:{}}}, active }
+  const session = { open: {}, current: {} };   // per-project open-tab lists + current file (runtime only)
+  let editor = null, monacoReady = false;
+  const models = {};             // key: proj + "\u0000" + file  ->  monaco model
+  let pyodide = null, pyReady = false, pyPromise = null, micropipLoaded = false;
+  let outTarget = "console";     // where python stdout goes: "console" | "terminal"
+  let persistOK = true;
+  let saveTimer = null;
+
+  const $ = (id) => document.getElementById(id);
+  const activeProject = () => ws.projects[ws.active];
+  const curFile = () => session.current[ws.active] || null;
+  const openList = () => session.open[ws.active] || (session.open[ws.active] = []);
+  const extOf = (n) => (n.split(".").pop() || "").toLowerCase();
+
+  /* ======================= persistence (IndexedDB, best-effort) ======================= */
+  function idbOpen() {
+    return new Promise((res, rej) => {
+      try {
+        const r = indexedDB.open("tinker-db", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("kv");
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      } catch (e) { rej(e); }
+    });
+  }
+  async function idbSet(k, v) {
+    const db = await idbOpen();
+    return new Promise((res, rej) => {
+      const tx = db.transaction("kv", "readwrite");
+      tx.objectStore("kv").put(v, k);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+  async function idbGet(k) {
+    const db = await idbOpen();
+    return new Promise((res, rej) => {
+      const tx = db.transaction("kv", "readonly");
+      const rq = tx.objectStore("kv").get(k);
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => rej(rq.error);
+    });
+  }
+
+  function scheduleSave() {
+    setSaveState("unsaved");
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(doSave, 500);
+  }
+  async function doSave() {
+    if (!persistOK) { setSaveState("blocked"); return; }
+    try {
+      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active }));
+      setSaveState("saved");
+    } catch (e) {
+      persistOK = false;
+      setSaveState("blocked");
+    }
+  }
+  function setSaveState(s) {
+    const el = $("save-state");
+    if (s === "saved") { el.textContent = "saved"; el.classList.remove("warn"); }
+    else if (s === "unsaved") { el.textContent = "unsaved…"; el.classList.remove("warn"); }
+    else { el.textContent = "not saved — storage blocked (deploy to keep files)"; el.classList.add("warn"); }
+  }
+
+  async function loadWorkspace() {
+    let data = null;
+    try { data = await idbGet("workspace"); }
+    catch (e) { persistOK = false; }
+    if (data) {
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed && parsed.projects && Object.keys(parsed.projects).length) {
+          ws = { projects: parsed.projects, active: parsed.active in parsed.projects ? parsed.active : Object.keys(parsed.projects)[0] };
+        }
+      } catch (e) { /* fall through to seed */ }
+    }
+    if (!ws) {
+      ws = { projects: { "hello-python": { type: "python", files: templateFiles("python") } }, active: "hello-python" };
+    }
+    // seed runtime open-tabs for the active project
+    const first = Object.keys(activeProject().files)[0];
+    session.open[ws.active] = first ? [first] : [];
+    session.current[ws.active] = first || null;
+  }
+
+  /* ======================= Monaco ======================= */
+  function langFor(name) {
+    const e = extOf(name);
+    return ({ py:"python", js:"javascript", html:"html", css:"css", json:"json", md:"markdown", txt:"plaintext" })[e] || "plaintext";
+  }
+  function modelKey(file) { return ws.active + "\u0000" + file; }
+  function getModel(file) {
+    const key = modelKey(file);
+    if (!models[key]) {
+      const m = monaco.editor.createModel(activeProject().files[file] ?? "", langFor(file));
+      m.onDidChangeContent(() => {
+        activeProject().files[file] = m.getValue();
+        scheduleSave();
+      });
+      models[key] = m;
+    }
+    return models[key];
+  }
+  function disposeModelsForProject(proj) {
+    Object.keys(models).forEach((k) => {
+      if (k.startsWith(proj + "\u0000")) { models[k].dispose(); delete models[k]; }
+    });
+  }
+
+  function initMonaco() {
+    window.MonacoEnvironment = {
+      getWorkerUrl: function () {
+        const base = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/";
+        const code = "self.MonacoEnvironment={baseUrl:'" + base + "'};importScripts('" + base + "vs/base/worker/workerMain.js');";
+        return URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+      }
+    };
+    require.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs" } });
+    require(["vs/editor/editor.main"], function () {
+      monaco.editor.defineTheme("tinker-dark", {
+        base: "vs-dark", inherit: true,
+        rules: [
+          { token: "", foreground: "e6e3da" },
+          { token: "comment", foreground: "5a626d", fontStyle: "italic" },
+          { token: "keyword", foreground: "e8a94b" },
+          { token: "string", foreground: "9fc48a" },
+          { token: "number", foreground: "6fb3c9" },
+          { token: "type", foreground: "6fb3c9" },
+          { token: "function", foreground: "e8c07d" }
+        ],
+        colors: {
+          "editor.background": "#14171c",
+          "editor.foreground": "#e6e3da",
+          "editorLineNumber.foreground": "#3d444d",
+          "editorLineNumber.activeForeground": "#8b93a0",
+          "editorCursor.foreground": "#e8a94b",
+          "editor.selectionBackground": "#2b3540",
+          "editor.lineHighlightBackground": "#1a1e24",
+          "editorIndentGuide.background1": "#21262e",
+          "editorWidget.background": "#1a1e24",
+          "editorGutter.background": "#14171c",
+          "editorSuggestWidget.background": "#1a1e24"
+        }
+      });
+      const host = $("editor");
+      host.classList.remove("empty"); host.textContent = "";
+      editor = monaco.editor.create(host, {
+        model: null, theme: "tinker-dark",
+        fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+        fontSize: 13.5, lineHeight: 21, minimap: { enabled: false },
+        scrollBeyondLastLine: false, tabSize: 4, automaticLayout: true,
+        padding: { top: 10 }, renderWhitespace: "selection", smoothScrolling: true
+      });
+      editor.onDidChangeCursorPosition((e) => {
+        $("cursor-pos").textContent = "Ln " + e.position.lineNumber + ", Col " + e.position.column;
+      });
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runActive);
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { doSave(); });
+      monacoReady = true;
+      const f = curFile();
+      if (f) openFile(f); else showEditorEmpty();
+    });
+  }
+  function showEditorEmpty() {
+    if (!editor) return;
+    editor.setModel(null);
+    $("editor").classList.add("empty");
+  }
+
+  /* ======================= sidebar + tabs ======================= */
+  function renderSidebar() {
+    const list = $("file-list"); list.innerHTML = "";
+    const files = Object.keys(activeProject().files).sort();
+    files.forEach((name) => {
+      const row = document.createElement("div");
+      row.className = "file-row" + (name === curFile() ? " active" : "");
+      row.innerHTML =
+        '<span class="dot-ext ext-' + extOf(name) + '"></span>' +
+        '<span class="fname"></span>' +
+        '<button class="del" title="Delete">×</button>';
+      row.querySelector(".fname").textContent = name;
+      row.addEventListener("click", (e) => { if (e.target.classList.contains("del")) return; openFile(name); });
+      row.querySelector(".del").addEventListener("click", (e) => { e.stopPropagation(); deleteFile(name); });
+      list.appendChild(row);
+    });
+  }
+  function renderTabs() {
+    const bar = $("tabs"); bar.innerHTML = "";
+    openList().forEach((name) => {
+      const t = document.createElement("div");
+      t.className = "tab" + (name === curFile() ? " active" : "");
+      t.innerHTML = '<span class="tname"></span><button class="x" title="Close">×</button>';
+      t.querySelector(".tname").textContent = name;
+      t.addEventListener("click", (e) => { if (e.target.classList.contains("x")) return; openFile(name); });
+      t.querySelector(".x").addEventListener("click", (e) => { e.stopPropagation(); closeTab(name); });
+      bar.appendChild(t);
+    });
+  }
+  function renderProjectPicker() {
+    const sel = $("proj-picker"); sel.innerHTML = "";
+    Object.keys(ws.projects).forEach((name) => {
+      const o = document.createElement("option");
+      o.value = name; o.textContent = name; o.selected = name === ws.active;
+      sel.appendChild(o);
+    });
+  }
+
+  /* ======================= file / project ops ======================= */
+  function openFile(name) {
+    if (!(name in activeProject().files)) return;
+    session.current[ws.active] = name;
+    const ol = openList();
+    if (!ol.includes(name)) ol.push(name);
+    if (monacoReady) { editor.setModel(getModel(name)); $("editor").classList.remove("empty"); editor.focus(); }
+    renderSidebar(); renderTabs();
+  }
+  function closeTab(name) {
+    const ol = openList();
+    const i = ol.indexOf(name); if (i >= 0) ol.splice(i, 1);
+    if (curFile() === name) {
+      const next = ol[ol.length - 1] || null;
+      if (next) openFile(next);
+      else { session.current[ws.active] = null; showEditorEmpty(); renderSidebar(); renderTabs(); }
+    } else { renderTabs(); }
+  }
+  function newFile() {
+    openModal(
+      "New file",
+      "Name it with an extension — .py, .html, .css, .js, .json, .txt.",
+      '<label>Filename</label><input type="text" id="mf-name" placeholder="script.py" spellcheck="false" />',
+      () => {
+        let name = ($("mf-name").value || "").trim().replace(/^\/+/, "");
+        if (!name) return "Enter a filename.";
+        if (/[\\/]/.test(name)) return "Folders aren't supported yet — use a flat name.";
+        if (name in activeProject().files) return "A file with that name already exists.";
+        activeProject().files[name] = "";
+        scheduleSave(); openFile(name); return true;
+      },
+      () => { const el = $("mf-name"); if (el) el.focus(); }
+    );
+  }
+  function deleteFile(name) {
+    const files = activeProject().files;
+    if (Object.keys(files).length <= 1) { flashConsole("Can't delete the last file in a project.", true); return; }
+    if (!confirm('Delete "' + name + '"? This can\'t be undone.')) return;
+    delete files[name];
+    const key = modelKey(name); if (models[key]) { models[key].dispose(); delete models[key]; }
+    const ol = openList(); const i = ol.indexOf(name); if (i >= 0) ol.splice(i, 1);
+    if (curFile() === name) {
+      const next = ol[ol.length - 1] || Object.keys(files)[0];
+      session.current[ws.active] = next; openFile(next);
+    }
+    scheduleSave(); renderSidebar(); renderTabs();
+  }
+
+  function slug(s) {
+    return (s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+  }
+  function newProject() {
+    let kind = "python";
+    const body =
+      '<label>Project name</label>' +
+      '<input type="text" id="mp-name" placeholder="my-project" spellcheck="false" />' +
+      '<label>Template</label>' +
+      '<div class="chips" id="mp-chips">' +
+        '<div class="chip sel" data-k="python">Python<small>main.py</small></div>' +
+        '<div class="chip" data-k="web">Web<small>html · css · js</small></div>' +
+        '<div class="chip" data-k="blank">Blank<small>empty</small></div>' +
+      '</div>';
+    openModal(
+      "New project", "Pick a starting point. You can add and delete files after.",
+      body,
+      () => {
+        let name = slug($("mp-name").value);
+        if (name in ws.projects) return "A project with that name already exists.";
+        ws.projects[name] = { type: kind, files: templateFiles(kind) };
+        switchProject(name);
+        scheduleSave();
+        return true;
+      },
+      () => {
+        const chips = $("mp-chips");
+        chips.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => {
+          chips.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+          c.classList.add("sel"); kind = c.dataset.k;
+        }));
+        const el = $("mp-name"); if (el) el.focus();
+      }
+    );
+  }
+  function switchProject(name) {
+    if (!(name in ws.projects)) return;
+    ws.active = name;
+    if (!session.open[name]) {
+      const first = Object.keys(ws.projects[name].files)[0];
+      session.open[name] = first ? [first] : [];
+      session.current[name] = first || null;
+    }
+    renderProjectPicker(); renderSidebar(); renderTabs();
+    const f = curFile();
+    if (f && monacoReady) openFile(f); else showEditorEmpty();
+    scheduleSave();
+  }
+
+  /* ======================= console / output routing ======================= */
+  function appendConsole(text, isErr) {
+    const out = $("console-out");
+    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 30;
+    if (isErr) { const s = document.createElement("span"); s.className = "err"; s.textContent = text; out.appendChild(s); }
+    else out.appendChild(document.createTextNode(text));
+    if (atBottom) out.scrollTop = out.scrollHeight;
+  }
+  function clearConsole() { $("console-out").innerHTML = ""; }
+  function flashConsole(text, isErr) { showPane("console"); appendConsole(text + "\n", isErr); }
+
+  function writeOut(s) {
+    if (outTarget === "terminal") term.write(s.replace(/\n/g, "\r\n"));
+    else appendConsole(s, false);
+  }
+  function writeErr(s) {
+    if (outTarget === "terminal") term.write("\x1b[38;2;217;112;95m" + s.replace(/\n/g, "\r\n") + "\x1b[0m");
+    else appendConsole(s, true);
+  }
+
+  /* ======================= Pyodide ======================= */
+  function ensurePyodide() {
+    if (pyReady) return Promise.resolve();
+    if (!pyPromise) pyPromise = initPyodide();
+    return pyPromise;
+  }
+  async function initPyodide() {
+    setRuntime("starting python…", "loading");
+    if (typeof loadPyodide !== "function") { setRuntime("python unavailable", ""); throw new Error("Pyodide runtime failed to load"); }
+    pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v314.0.2/full/" });
+    pyodide.setStdout({ batched: (s) => writeOut(s + "\n") });
+    pyodide.setStderr({ batched: (s) => writeErr(s + "\n") });
+    pyReady = true;
+    let ver = "3";
+    try { ver = pyodide.runPython("import sys; '.'.join(map(str, sys.version_info[:3]))"); } catch (e) {}
+    setRuntime("python " + ver + " · ready", "ready");
+    return pyodide;
+  }
+  function setRuntime(text, cls) {
+    $("rt-status").textContent = text;
+    const dot = $("rt-dot"); dot.className = "sb-dot" + (cls ? " " + cls : "");
+  }
+
+  const RUN_WRAPPER =
+`import sys, os, traceback
+os.chdir('/project')
+__f = __run_target__
+sys.argv = [__f]
+try:
+    with open(__f, 'r') as _fh:
+        _src = _fh.read()
+    _code = compile(_src, __f, 'exec')
+    exec(_code, {'__name__': '__main__', '__file__': __f})
+except SystemExit:
+    pass
+except Exception:
+    traceback.print_exc()
+`;
+
+  function syncProjectToFS() {
+    const files = activeProject().files;
+    try { pyodide.FS.mkdir("/project"); } catch (e) {}
+    // remove stale files so deleted modules don't linger
+    let existing = [];
+    try { existing = pyodide.FS.readdir("/project").filter((n) => n !== "." && n !== ".."); } catch (e) {}
+    existing.forEach((n) => { if (!(n in files)) { try { pyodide.FS.unlink("/project/" + n); } catch (e) {} } });
+    Object.keys(files).forEach((name) => {
+      if (/[\\/]/.test(name)) return; // flat only in v1
+      try { pyodide.FS.writeFile("/project/" + name, new TextEncoder().encode(files[name])); } catch (e) {}
+    });
+  }
+
+  async function runPythonFile(path, target) {
+    outTarget = target;
+    if (!(path in activeProject().files)) { writeErr("No such file: " + path + "\n"); return; }
+    if (!pyReady) {
+      (target === "terminal" ? termNote : (m) => appendConsole(m + "\n", false))("Loading Python runtime… (first run downloads a few MB)");
+      try { await ensurePyodide(); }
+      catch (e) {
+        const emit = (target === "terminal") ? (m) => termPrint(m, "err") : (m) => appendConsole(m + "\n", true);
+        emit("Couldn't load the Python runtime — the sandbox likely blocked the download. Deploy to GitHub Pages (or open the file locally) and it'll work.");
+        return;
+      }
+      outTarget = target;
+    }
+    syncProjectToFS();
+    pyodide.globals.set("__run_target__", path);
+    try { await pyodide.runPythonAsync(RUN_WRAPPER); }
+    catch (e) { writeErr(String((e && e.message) || e) + "\n"); }
+    try { pyodide.globals.delete("__run_target__"); } catch (e) {}
+  }
+
+  async function pipInstall(pkgs) {
+    await ensurePyodide();
+    if (!micropipLoaded) { termNote("Loading micropip…"); await pyodide.loadPackage("micropip"); micropipLoaded = true; }
+    for (const p of pkgs) {
+      termPrint("Collecting " + p + "…", "muted");
+      try {
+        await pyodide.runPythonAsync("import micropip\nawait micropip.install(" + JSON.stringify(p) + ")");
+        termPrint("Successfully installed " + p, "ok");
+      } catch (e) {
+        const msg = String((e && e.message) || e).split("\n").slice(-6).join("\n");
+        termPrint("ERROR: couldn't install " + p, "err");
+        termPrint(msg + "\n(not every PyPI package has a WebAssembly build)", "muted");
+      }
+    }
+  }
+
+  /* ======================= run dispatcher + preview ======================= */
+  function runActive() {
+    const f = curFile();
+    if (!f) { flashConsole("Open a file first.", false); return; }
+    const e = extOf(f);
+    if (e === "py") { showPane("console"); clearConsole(); runPythonFile(f, "console"); }
+    else if (e === "html") { showPane("preview"); buildPreview(f); }
+    else if (e === "js" || e === "css") {
+      if ("index.html" in activeProject().files) { showPane("preview"); buildPreview("index.html"); }
+      else flashConsole("Nothing to run for a ." + e + " file on its own. Add an index.html and press Run there.", false);
+    } else { flashConsole("Run works on .py and .html files.", false); }
+  }
+  function buildPreview(entry) {
+    const files = activeProject().files;
+    let html = files[entry] != null ? files[entry] : "<!-- missing " + entry + " -->";
+    html = html.replace(/<link\b[^>]*href=["']([^"']+\.css)["'][^>]*>/gi, (m, href) => {
+      const css = files[href.replace(/^\.\//, "")];
+      return css != null ? "<style>\n" + css + "\n</style>" : m;
+    });
+    html = html.replace(/<script\b[^>]*src=["']([^"']+\.js)["'][^>]*><\/script>/gi, (m, src) => {
+      const js = files[src.replace(/^\.\//, "")];
+      return js != null ? "<script>\n" + js + "\n<\/script>" : m;
+    });
+    $("preview-frame").srcdoc = html;
+  }
+
+  /* ======================= panels ======================= */
+  function showPane(name) {
+    document.querySelectorAll(".ptab").forEach((t) => t.classList.toggle("active", t.dataset.pane === name));
+    document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === name));
+    if (name === "terminal") { setTimeout(() => { try { fit.fit(); } catch (e) {} term.focus(); }, 0); }
+    if (name === "preview") {
+      const p = activeProject();
+      if ("index.html" in p.files) buildPreview("index.html");
+      else $("preview-frame").srcdoc = "<body style='font:14px system-ui;color:#8b93a0;background:#14171c;display:grid;place-items:center;height:100vh;margin:0'>Preview shows web projects — this one has no index.html.</body>";
+    }
+  }
+
+  /* ======================= terminal ======================= */
+  let term, fit, buf = "", hist = [], histIdx = 0, busy = false;
+  const PROMPT = "\x1b[38;2;232;169;75mtinker\x1b[0m:\x1b[38;2;111;179;201m~\x1b[0m$ ";
+  function writePrompt() { term.write(PROMPT); }
+  function termPrint(text, kind) {
+    let c = "";
+    if (kind === "err") c = "\x1b[38;2;217;112;95m";
+    else if (kind === "ok") c = "\x1b[38;2;127;179;122m";
+    else if (kind === "muted") c = "\x1b[38;2;122;130;144m";
+    term.write(c + String(text).replace(/\n/g, "\r\n") + (c ? "\x1b[0m" : "") + "\r\n");
+  }
+  function termNote(text) { termPrint(text, "muted"); }
+
+  function initTerminal() {
+    term = new Terminal({
+      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      fontSize: 13, lineHeight: 1.2, cursorBlink: true, convertEol: false,
+      theme: {
+        background: "#14171c", foreground: "#e6e3da", cursor: "#e8a94b",
+        selectionBackground: "#2b3540", black: "#14171c", brightBlack: "#5a626d",
+        white: "#e6e3da", brightWhite: "#ffffff"
+      }
+    });
+    fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open($("term-host"));
+    setTimeout(() => { try { fit.fit(); } catch (e) {} }, 0);
+
+    term.write("\x1b[38;2;122;130;144mTinker terminal — type \x1b[0mhelp\x1b[38;2;122;130;144m for commands.\x1b[0m\r\n" + PROMPT);
+
+    term.onData(onTermData);
+  }
+
+  async function onTermData(d) {
+    if (busy) return;
+    const code = d.charCodeAt(0);
+    if (d === "\r") {                               // Enter
+      const line = buf; buf = "";
+      term.write("\r\n");
+      if (line.trim()) { hist.push(line); }
+      histIdx = hist.length;
+      busy = true;
+      try { await runCommand(line); }
+      catch (e) { termPrint(String((e && e.message) || e), "err"); }
+      busy = false;
+      writePrompt();
+      return;
+    }
+    if (d === "\u007f") {                            // Backspace
+      if (buf.length) { buf = buf.slice(0, -1); term.write("\b \b"); }
+      return;
+    }
+    if (d === "\u0003") {                            // Ctrl-C
+      term.write("^C\r\n"); buf = ""; writePrompt(); return;
+    }
+    if (d === "\u001b[A" || d === "\u001b[B") {      // history up/down
+      if (!hist.length) return;
+      histIdx += (d === "\u001b[A") ? -1 : 1;
+      histIdx = Math.max(0, Math.min(hist.length, histIdx));
+      const repl = hist[histIdx] || "";
+      for (let i = 0; i < buf.length; i++) term.write("\b \b");
+      buf = repl; term.write(repl);
+      return;
+    }
+    if (code < 32) return;                           // ignore other control seqs
+    buf += d; term.write(d);                         // printable (incl. pasted runs)
+  }
+
+  async function runCommand(line) {
+    const parts = line.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return;
+    const cmd = parts[0], args = parts.slice(1);
+    const files = activeProject().files;
+    switch (cmd) {
+      case "help":
+        termPrint(
+          "commands:\n" +
+          "  python <file>      run a Python file\n" +
+          "  pip install <pkg>  install a package (micropip / Pyodide)\n" +
+          "  ls                 list files in this project\n" +
+          "  cat <file>         print a file\n" +
+          "  echo <text>        print text\n" +
+          "  clear              clear the terminal\n" +
+          "  help               show this help", "muted");
+        break;
+      case "clear": term.clear(); break;
+      case "ls": {
+        const names = Object.keys(files).sort();
+        termPrint(names.join("  ") || "(empty)");
+        break;
+      }
+      case "pwd": termPrint("/project"); break;
+      case "echo": termPrint(args.join(" ")); break;
+      case "cat":
+        if (!args[0]) { termPrint("usage: cat <file>", "muted"); break; }
+        if (args[0] in files) termPrint(files[args[0]]);
+        else termPrint("cat: " + args[0] + ": no such file", "err");
+        break;
+      case "python": case "python3":
+        if (!args[0]) { termPrint("usage: python <file>", "muted"); break; }
+        outTarget = "terminal";
+        await runPythonFile(args[0], "terminal");
+        break;
+      case "pip": case "pip3":
+        if (args[0] === "install" && args[1]) { outTarget = "terminal"; await pipInstall(args.slice(1)); }
+        else termPrint("usage: pip install <package>", "muted");
+        break;
+      default:
+        termPrint(cmd + ": command not found  (try: help)", "err");
+    }
+  }
+
+  /* ======================= modal ======================= */
+  let modalSubmit = null;
+  function openModal(title, desc, bodyHtml, onSubmit, afterOpen) {
+    modalSubmit = onSubmit;
+    $("modal-box").innerHTML =
+      "<h2></h2><p></p><div class='mbody'></div>" +
+      "<div class='modal-actions'>" +
+        "<button class='btn' id='modal-cancel'>Cancel</button>" +
+        "<button class='btn primary' id='modal-ok'>Create</button>" +
+      "</div>";
+    $("modal-box").querySelector("h2").textContent = title;
+    $("modal-box").querySelector("p").textContent = desc;
+    $("modal-box").querySelector(".mbody").innerHTML = bodyHtml;
+    $("modal-scrim").classList.add("show");
+    $("modal-cancel").addEventListener("click", closeModal);
+    $("modal-ok").addEventListener("click", submitModal);
+    $("modal-box").querySelectorAll("input").forEach((inp) =>
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") submitModal(); }));
+    if (afterOpen) afterOpen();
+  }
+  function submitModal() {
+    if (!modalSubmit) return;
+    const res = modalSubmit();
+    if (res === true) closeModal();
+    else if (typeof res === "string") {
+      let e = $("modal-box").querySelector(".modal-err");
+      if (!e) { e = document.createElement("p"); e.className = "modal-err"; e.style.color = "var(--danger)"; e.style.margin = "10px 0 0"; e.style.fontSize = "12px"; $("modal-box").querySelector(".mbody").appendChild(e); }
+      e.textContent = res;
+    }
+  }
+  function closeModal() { $("modal-scrim").classList.remove("show"); modalSubmit = null; }
+
+  /* ======================= divider (resize panel) ======================= */
+  function initDivider() {
+    const div = $("divider"), panel = $("panel");
+    let dragging = false;
+    div.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); document.body.style.userSelect = "none"; });
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const main = $("main").getBoundingClientRect();
+      let h = main.bottom - e.clientY;
+      h = Math.max(90, Math.min(main.height - 120, h));
+      panel.style.flexBasis = h + "px";
+      try { fit.fit(); } catch (err) {}
+    });
+    window.addEventListener("mouseup", () => { if (dragging) { dragging = false; document.body.style.userSelect = ""; } });
+  }
+
+  /* ======================= wiring + init ======================= */
+  function wireEvents() {
+    $("run-btn").addEventListener("click", runActive);
+    $("new-file-btn").addEventListener("click", newFile);
+    $("new-proj-btn").addEventListener("click", newProject);
+    $("clear-console-btn").addEventListener("click", clearConsole);
+    $("proj-picker").addEventListener("change", (e) => switchProject(e.target.value));
+    document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
+    $("modal-scrim").addEventListener("mousedown", (e) => { if (e.target === $("modal-scrim")) closeModal(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeModal();
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); doSave(); }
+    });
+    window.addEventListener("beforeunload", () => { if (persistOK) doSave(); });
+    window.addEventListener("resize", () => { try { fit.fit(); } catch (e) {} });
+  }
+
+  async function boot() {
+    await loadWorkspace();
+    renderProjectPicker(); renderSidebar(); renderTabs();
+    setSaveState(persistOK ? "saved" : "blocked");
+    try { initTerminal(); } catch (e) { console.error("terminal failed to load", e); }
+    initDivider();
+    wireEvents();
+    try { initMonaco(); }
+    catch (e) {
+      console.error("editor failed to load", e);
+      const h = $("editor"); h.classList.remove("empty"); h.textContent = "Editor failed to load — check your connection, or deploy the file.";
+    }
+    ensurePyodide().catch(() => {});   // warm up Python in the background
+  }
+  boot();
+})();
+</script>
+</body>
+</html>
