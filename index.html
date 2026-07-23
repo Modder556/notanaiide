@@ -12,7 +12,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 <script src="https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs/loader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.53.0/min/vs/loader.js"></script>
 
 <style>
   :root {
@@ -148,6 +148,16 @@
 
   #editor { flex: 1; min-height: 0; }
   #editor.empty { display: grid; place-items: center; color: var(--faint); font-family: var(--mono); font-size: 13px; }
+  #fb-note {
+    padding: 7px 12px; font-size: 12px; color: var(--accent);
+    background: #241f16; border-bottom: 1px solid var(--border);
+  }
+  #fb-note a { color: var(--cyan); }
+  #fb-area {
+    width: 100%; height: calc(100% - 32px); border: 0; outline: none; resize: none;
+    background: var(--bg); color: var(--text); padding: 10px 12px;
+    font-family: var(--mono); font-size: 13.5px; line-height: 21px; tab-size: 4;
+  }
 
   /* horizontal divider */
   #divider {
@@ -265,6 +275,7 @@
     </div>
     <button class="btn" id="new-proj-btn">+ New project</button>
     <button class="btn" id="profiles-btn" title="Language profiles">Profiles</button>
+    <button class="btn" id="settings-btn" title="Settings">Settings</button>
     <div class="topbar-spacer"></div>
     <button class="btn primary" id="run-btn" title="Run (Ctrl/Cmd + Enter)">▶ Run</button>
   </div>
@@ -432,11 +443,10 @@ __WEB_JS__
 name: Turtle
 icon: "\u25B2"
 color: "#7fb37a"
-extends: python
 extensions:
   .py: python
 run:
-  strategy: turtle
+  strategy: pyodide
   entry: main.py
 files:
   main.py: |
@@ -750,11 +760,14 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   let ws = null;                 // { projects: {name:{type,files:{}}}, active }
   const session = { open: {}, current: {} };   // per-project open-tab lists + current file (runtime only)
   let editor = null, monacoReady = false;
+  let editorMode = "loading";   // "loading" | "monaco" | "fallback"
+  let fbArea = null;
   const models = {};             // key: proj + "\u0000" + file  ->  monaco model
   let pyodide = null, pyReady = false, pyPromise = null, micropipLoaded = false;
   let outTarget = "console";     // where python stdout goes: "console" | "terminal"
   let persistOK = true;
   let saveTimer = null;
+  let settings = { alwaysAsk: false };
 
   const $ = (id) => document.getElementById(id);
   const activeProject = () => ws.projects[ws.active];
@@ -800,7 +813,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   async function doSave() {
     if (!persistOK) { setSaveState("blocked"); return; }
     try {
-      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml }));
+      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings }));
       setSaveState("saved");
     } catch (e) {
       persistOK = false;
@@ -829,6 +842,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
             catch (e) { console.warn("dropped broken custom profile", id, e); }
           });
         }
+        if (parsed && parsed.settings) settings = Object.assign(settings, parsed.settings);
         if (parsed && parsed.projects && Object.keys(parsed.projects).length) {
           ws = { projects: parsed.projects, active: parsed.active in parsed.projects ? parsed.active : Object.keys(parsed.projects)[0] };
           // migrate v1 projects: {type} -> {profile}
@@ -836,12 +850,16 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
             const p = ws.projects[n];
             if (!p.profile) { p.profile = (p.type && profiles[p.type]) ? p.type : "python"; delete p.type; }
             if (!profiles[p.profile]) p.profile = "blank";
+            if (!p.mainFile) {
+              const entry = profiles[p.profile] && profiles[p.profile].run ? profiles[p.profile].run.entry : null;
+              p.mainFile = (entry && entry in p.files) ? entry : null;
+            }
           });
         }
       } catch (e) { /* fall through to seed */ }
     }
     if (!ws) {
-      ws = { projects: { "hello-python": { profile: "python", files: templateFiles("python") } }, active: "hello-python" };
+      ws = { projects: { "hello-python": { profile: "python", mainFile: "main.py", files: templateFiles("python") } }, active: "hello-python" };
     }
     // seed runtime open-tabs for the active project
     const first = Object.keys(activeProject().files)[0];
@@ -877,15 +895,20 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     });
   }
 
+  const MONACO_BASE = "https://cdn.jsdelivr.net/npm/monaco-editor@0.53.0/min/";
+  let monacoTimer = null;
+
   function initMonaco() {
     window.MonacoEnvironment = {
       getWorkerUrl: function () {
-        const base = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/";
-        const code = "self.MonacoEnvironment={baseUrl:'" + base + "'};importScripts('" + base + "vs/base/worker/workerMain.js');";
+        const code = "self.MonacoEnvironment={baseUrl:'" + MONACO_BASE + "'};importScripts('" + MONACO_BASE + "vs/base/worker/workerMain.js');";
         return URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
       }
     };
-    require.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs" } });
+    if (typeof require === "undefined" || !require.config) { useFallbackEditor("the editor script didn't load"); return; }
+    // never hang on "Loading editor…" again — fall back to a plain editor
+    monacoTimer = setTimeout(() => { if (!monacoReady) useFallbackEditor("the editor timed out"); }, 15000);
+    require.config({ paths: { vs: MONACO_BASE + "vs" } });
     require(["vs/editor/editor.main"], function () {
       monaco.editor.defineTheme("tinker-dark", {
         base: "vs-dark", inherit: true,
@@ -927,11 +950,54 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runActive);
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { doSave(); });
       monacoReady = true;
+      editorMode = "monaco";
+      clearTimeout(monacoTimer);
       const f = curFile();
       if (f) openFile(f); else showEditorEmpty();
+    }, function (err) {
+      console.error("monaco failed", err);
+      useFallbackEditor("the editor failed to load");
     });
   }
+
+  /* A plain-textarea editor so a blocked CDN degrades instead of bricking Tinker. */
+  function useFallbackEditor(reason) {
+    if (editorMode === "fallback" || monacoReady) return;
+    clearTimeout(monacoTimer);
+    editorMode = "fallback";
+    const host = $("editor");
+    host.classList.remove("empty");
+    host.innerHTML =
+      '<div id="fb-note">Syntax highlighting is off — ' + escapeHtml(reason) +
+      '. Everything else works. <a href="#" id="fb-retry">Retry</a></div>' +
+      '<textarea id="fb-area" spellcheck="false" autocomplete="off"></textarea>';
+    fbArea = $("fb-area");
+    fbArea.addEventListener("input", () => {
+      const f = curFile();
+      if (f) { activeProject().files[f] = fbArea.value; scheduleSave(); }
+    });
+    fbArea.addEventListener("keydown", (e) => {
+      if (e.key === "Tab") {                       // keep Tab in the editor
+        e.preventDefault();
+        const s = fbArea.selectionStart, en = fbArea.selectionEnd;
+        fbArea.value = fbArea.value.slice(0, s) + "    " + fbArea.value.slice(en);
+        fbArea.selectionStart = fbArea.selectionEnd = s + 4;
+        fbArea.dispatchEvent(new Event("input"));
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runActive(); }
+    });
+    $("fb-retry").addEventListener("click", (e) => {
+      e.preventDefault();
+      editorMode = "loading";
+      $("editor").innerHTML = "Loading editor…";
+      $("editor").classList.add("empty");
+      initMonaco();
+    });
+    const f = curFile();
+    if (f) openFile(f);
+  }
   function showEditorEmpty() {
+    if (editorMode === "fallback" && fbArea) { fbArea.value = ""; return; }
     if (!editor) return;
     editor.setModel(null);
     $("editor").classList.add("empty");
@@ -983,7 +1049,12 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     session.current[ws.active] = name;
     const ol = openList();
     if (!ol.includes(name)) ol.push(name);
-    if (monacoReady) { editor.setModel(getModel(name)); $("editor").classList.remove("empty"); editor.focus(); }
+    if (editorMode === "monaco" && monacoReady) {
+      editor.setModel(getModel(name)); $("editor").classList.remove("empty"); editor.focus();
+    } else if (editorMode === "fallback" && fbArea) {
+      fbArea.value = activeProject().files[name] != null ? activeProject().files[name] : "";
+      fbArea.focus();
+    }
     renderSidebar(); renderTabs();
   }
   function closeTab(name) {
@@ -1016,6 +1087,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     if (Object.keys(files).length <= 1) { flashConsole("Can't delete the last file in a project.", true); return; }
     if (!confirm('Delete "' + name + '"? This can\'t be undone.')) return;
     delete files[name];
+    if (activeProject().mainFile === name) activeProject().mainFile = null;
     const key = modelKey(name); if (models[key]) { models[key].dispose(); delete models[key]; }
     const ol = openList(); const i = ol.indexOf(name); if (i >= 0) ol.splice(i, 1);
     if (curFile() === name) {
@@ -1049,7 +1121,9 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
       () => {
         let name = slug($("mp-name").value);
         if (name in ws.projects) return "A project with that name already exists.";
-        ws.projects[name] = { profile: kind, files: templateFiles(kind) };
+        const files = templateFiles(kind);
+        const entry = profiles[kind] && profiles[kind].run ? profiles[kind].run.entry : null;
+        ws.projects[name] = { profile: kind, files: files, mainFile: (entry && entry in files) ? entry : null };
         switchProject(name);
         scheduleSave();
         return true;
@@ -1083,6 +1157,43 @@ files:
   main.py: |
     print("hello from my profile")
 `;
+
+  function showSettings() {
+    const proj = activeProject();
+    const cands = runnableFiles(proj);
+    let mode = settings.alwaysAsk ? "ask" : "main";
+    let main = proj.mainFile && cands.indexOf(proj.mainFile) >= 0 ? proj.mainFile : "";
+    const fileOpts = ['<option value="">— ask me each time —</option>']
+      .concat(cands.map((n) => '<option value="' + escapeHtml(n) + '"' + (n === main ? " selected" : "") + '>' + escapeHtml(n) + '</option>'))
+      .join("");
+    openModal(
+      "Settings", "How Tinker behaves when you press Run.",
+      '<label>When you press Run</label>' +
+      '<div class="chips" id="st-mode">' +
+        '<div class="chip' + (mode === "main" ? " sel" : "") + '" data-m="main">Use main file<small>ask once, then remember</small></div>' +
+        '<div class="chip' + (mode === "ask" ? " sel" : "") + '" data-m="ask">Always ask<small>choose every run</small></div>' +
+      '</div>' +
+      '<label>Main file — ' + escapeHtml(ws.active) + '</label>' +
+      '<select id="st-main" style="width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:7px;padding:9px 10px;color:var(--text);font-family:var(--mono);font-size:13px">' +
+        fileOpts +
+      '</select>' +
+      '<p style="margin:14px 0 0;font-size:11.5px;color:var(--faint)">Turtle is built in: if any file imports turtle, Run draws to the Canvas panel automatically.</p>',
+      () => {
+        settings.alwaysAsk = (mode === "ask");
+        activeProject().mainFile = $("st-main").value || null;
+        scheduleSave();
+        return true;
+      },
+      () => {
+        $("modal-ok").textContent = "Save";
+        const c = $("st-mode");
+        c.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+          c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+          el.classList.add("sel"); mode = el.dataset.m;
+        }));
+      }
+    );
+  }
 
   function showProfiles() {
     const rows = Object.keys(profiles).map((id) => {
@@ -1275,29 +1386,72 @@ except Exception:
   }
 
   /* ======================= run dispatcher + preview ======================= */
+  /* ======================= run targets ======================= */
+  // Turtle is built in: any project that imports it draws to the Canvas panel.
+  const TURTLE_RE = /^[ \t]*(?:from[ \t]+turtle[ \t]+import|import[ \t]+turtle)\b/m;
+  function usesTurtle(proj) {
+    return Object.keys(proj.files).some((n) => extOf(n) === "py" && TURTLE_RE.test(proj.files[n] || ""));
+  }
+  function runnableFiles(proj) {
+    const prof = profileOf(proj);
+    const strategy = (prof.run && prof.run.strategy) || "none";
+    const want = strategy === "preview" ? "html" : "py";
+    return Object.keys(proj.files).filter((n) => extOf(n) === want).sort();
+  }
+
   function runActive() {
     const proj = activeProject();
     const prof = profileOf(proj);
-    const f = curFile();
     const strategy = (prof.run && prof.run.strategy) || "none";
-    const entry = (prof.run && prof.run.entry) || f;
-
     if (strategy === "none") { flashConsole("This profile has no run strategy — edit it in Profiles to add one.", false); return; }
-    if (strategy === "preview") {
-      const target = (f && extOf(f) === "html") ? f : (entry in proj.files ? entry : null);
-      if (!target) { flashConsole("Nothing to preview — this project has no " + entry + ".", false); return; }
-      showPane("preview"); buildPreview(target); return;
+
+    const cands = runnableFiles(proj);
+    if (!cands.length) {
+      flashConsole("Nothing runnable here — this project has no " + (strategy === "preview" ? ".html" : ".py") + " file.", false);
+      return;
     }
-    if (strategy === "turtle") {
-      const target = (f && extOf(f) === "py") ? f : entry;
-      showPane("canvas"); runPythonFile(target, "console", true); return;
-    }
-    if (strategy === "pyodide") {
-      const target = (f && extOf(f) === "py") ? f : entry;
-      if (!(target in proj.files)) { flashConsole("No " + target + " in this project.", false); return; }
-      showPane("console"); clearConsole(); runPythonFile(target, "console"); return;
-    }
-    flashConsole("Unknown run strategy: " + strategy, true);
+    const remembered = proj.mainFile && cands.indexOf(proj.mainFile) >= 0 ? proj.mainFile : null;
+    if (!settings.alwaysAsk && remembered) { execute(remembered); return; }
+    if (!settings.alwaysAsk && cands.length === 1) { proj.mainFile = cands[0]; scheduleSave(); execute(cands[0]); return; }
+    askWhichFile(cands, remembered || cands[0], execute);
+  }
+
+  function askWhichFile(cands, preselect, then) {
+    let pick = preselect;
+    const opts = cands.map((n) =>
+      '<div class="chip' + (n === preselect ? " sel" : "") + '" data-f="' + escapeHtml(n) + '">' + escapeHtml(n) + '</div>'
+    ).join("");
+    openModal(
+      "Which file should run?", "Pick the entry point for this project.",
+      '<div class="chips" id="rf-chips" style="flex-wrap:wrap">' + opts + '</div>' +
+      '<label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--dim);margin-top:14px">' +
+        '<input type="checkbox" id="rf-remember" checked /> Remember this as the main file for this project' +
+      '</label>',
+      () => {
+        if ($("rf-remember").checked) { activeProject().mainFile = pick; scheduleSave(); }
+        then(pick);
+        return true;
+      },
+      () => {
+        $("modal-ok").textContent = "Run";
+        const c = $("rf-chips");
+        c.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+          c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+          el.classList.add("sel"); pick = el.dataset.f;
+        }));
+      }
+    );
+  }
+
+  function execute(file) {
+    const proj = activeProject();
+    const prof = profileOf(proj);
+    const strategy = (prof.run && prof.run.strategy) || "none";
+    if (strategy === "preview") { showPane("preview"); buildPreview(file); return; }
+    // pyodide (and the legacy turtle strategy) — switch to canvas automatically
+    const turtle = usesTurtle(proj) || strategy === "turtle";
+    if (turtle) { showPane("canvas"); runPythonFile(file, "console", true); }
+    else { showPane("console"); clearConsole(); runPythonFile(file, "console", false); }
   }
   function buildPreview(entry) {
     const files = activeProject().files;
@@ -1429,7 +1583,13 @@ except Exception:
       case "python": case "python3":
         if (!args[0]) { termPrint("usage: python <file>", "muted"); break; }
         outTarget = "terminal";
-        await runPythonFile(args[0], "terminal");
+        if (usesTurtle(activeProject())) {
+          termPrint("turtle detected — drawing to the Canvas panel", "muted");
+          await runPythonFile(args[0], "terminal", true);
+          showPane("canvas");
+        } else {
+          await runPythonFile(args[0], "terminal", false);
+        }
         break;
       case "pip": case "pip3":
         if (args[0] === "install" && args[1]) { outTarget = "terminal"; await pipInstall(args.slice(1)); }
@@ -1495,6 +1655,7 @@ except Exception:
     $("new-file-btn").addEventListener("click", newFile);
     $("new-proj-btn").addEventListener("click", newProject);
     $("profiles-btn").addEventListener("click", showProfiles);
+    $("settings-btn").addEventListener("click", showSettings);
     $("clear-console-btn").addEventListener("click", clearConsole);
     $("proj-picker").addEventListener("change", (e) => switchProject(e.target.value));
     document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
