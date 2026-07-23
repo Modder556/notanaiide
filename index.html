@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 <script src="https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs/loader.js"></script>
 
@@ -184,6 +185,28 @@
   #term-host { height: 100%; padding: 6px 4px 4px 10px; }
   .xterm { height: 100%; }
   #preview-frame { width: 100%; height: 100%; border: 0; background: #fff; }
+  #canvas-host { width: 100%; height: 100%; display: grid; place-items: center; background: #101317; overflow: auto; }
+  #turtle-canvas { background: #fff; border-radius: 4px; box-shadow: 0 2px 14px rgba(0,0,0,.35); }
+
+  /* profiles list */
+  .modal.wide { width: 520px; }
+  .prof-list { max-height: 240px; overflow-y: auto; margin: 4px 0 0; }
+  .prof-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px; background: var(--bg-3);
+  }
+  .prof-row .pmeta { flex: 1; min-width: 0; }
+  .prof-row .pname { font-family: var(--mono); font-size: 12.5px; }
+  .prof-row .pdesc { color: var(--faint); font-size: 11px; font-family: var(--mono); margin-top: 2px; }
+  .prof-row .ptag {
+    font-size: 10px; font-family: var(--mono); color: var(--faint);
+    border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px;
+  }
+  .modal textarea {
+    width: 100%; height: 150px; resize: vertical; background: var(--bg-3);
+    border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px;
+    color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  }
 
   /* status bar */
   #statusbar {
@@ -241,6 +264,7 @@
       <select id="proj-picker" title="Switch project"></select>
     </div>
     <button class="btn" id="new-proj-btn">+ New project</button>
+    <button class="btn" id="profiles-btn" title="Language profiles">Profiles</button>
     <div class="topbar-spacer"></div>
     <button class="btn primary" id="run-btn" title="Run (Ctrl/Cmd + Enter)">▶ Run</button>
   </div>
@@ -263,6 +287,7 @@
           <div class="ptab active" data-pane="console">Console</div>
           <div class="ptab" data-pane="terminal">Terminal</div>
           <div class="ptab" data-pane="preview">Preview</div>
+          <div class="ptab" data-pane="canvas">Canvas</div>
           <div class="ptab-spacer"></div>
           <button class="icon-btn ptab-btn" id="clear-console-btn" title="Clear console">⌫</button>
         </div>
@@ -270,6 +295,7 @@
           <div class="pane active" data-pane="console"><div id="console-out"><span class="muted">Run a Python file to see output here.</span></div></div>
           <div class="pane" data-pane="terminal"><div id="term-host"></div></div>
           <div class="pane" data-pane="preview"><iframe id="preview-frame" sandbox="allow-scripts allow-modals"></iframe></div>
+          <div class="pane" data-pane="canvas"><div id="canvas-host"><canvas id="turtle-canvas"></canvas></div></div>
         </div>
       </div>
     </div>
@@ -348,12 +374,377 @@ btn.addEventListener("click", () => {
   count.textContent = taps + (taps === 1 ? " tap" : " taps");
 });
 `;
+  T.turtle =
+`# Turtle graphics — draws to the Canvas panel.
+# Press Run (Ctrl/Cmd + Enter).
+from turtle import *
 
-  function templateFiles(kind) {
-    if (kind === "web") return { "index.html": T.webHtml, "style.css": T.webCss, "script.js": T.webJs };
-    if (kind === "blank") return { "main.py": "# start here\n" };
-    return { "main.py": T.python };
+pensize(2)
+colors = ["#e8a94b", "#6fb3c9", "#d9705f", "#a888d8", "#7fb37a"]
+
+for i in range(60):
+    pencolor(colors[i % len(colors)])
+    forward(i * 4)
+    right(59)
+
+hideturtle()
+done()
+`;
+
+  /* ======================= language profiles =======================
+     A profile is data, not code. Anything the IDE knows about a language
+     lives in one YAML document, so adding a language = adding a file.   */
+
+  const BUILTIN_PROFILE_YAML = [
+`id: python
+name: Python
+icon: "\u25CF"
+color: "#e8a94b"
+extensions:
+  .py: python
+run:
+  strategy: pyodide
+  entry: main.py
+files:
+  main.py: |
+__PY_TEMPLATE__
+`,
+`id: web
+name: Web
+icon: "\u25C6"
+color: "#d9705f"
+extensions:
+  .html: html
+  .css: css
+  .js: javascript
+run:
+  strategy: preview
+  entry: index.html
+files:
+  index.html: |
+__WEB_HTML__
+  style.css: |
+__WEB_CSS__
+  script.js: |
+__WEB_JS__
+`,
+`id: turtle
+name: Turtle
+icon: "\u25B2"
+color: "#7fb37a"
+extends: python
+extensions:
+  .py: python
+run:
+  strategy: turtle
+  entry: main.py
+files:
+  main.py: |
+__TURTLE_TEMPLATE__
+`,
+`id: blank
+name: Blank
+icon: "\u25CB"
+color: "#8b93a0"
+extensions:
+  .py: python
+  .txt: plaintext
+  .md: markdown
+run:
+  strategy: pyodide
+  entry: main.py
+files:
+  main.py: |
+__BLANK_TEMPLATE__
+`
+  ];
+
+  // YAML block scalars need every line indented; keep templates readable above.
+  function indentBlock(s, pad) {
+    return s.replace(/\n$/, "").split("\n").map((l) => pad + l).join("\n");
   }
+  function hydrate(yamlSrc) {
+    return yamlSrc
+      .replace("__PY_TEMPLATE__", indentBlock(T.python, "    "))
+      .replace("__WEB_HTML__", indentBlock(T.webHtml, "    "))
+      .replace("__WEB_CSS__", indentBlock(T.webCss, "    "))
+      .replace("__WEB_JS__", indentBlock(T.webJs, "    "))
+      .replace("__TURTLE_TEMPLATE__", indentBlock(T.turtle, "    "))
+      .replace("__BLANK_TEMPLATE__", indentBlock("# start here\n", "    "));
+  }
+
+  const profiles = {};   // id -> profile object
+  let customProfileYaml = {};  // id -> raw yaml (persisted, user-installed)
+
+  function parseProfile(yamlSrc) {
+    if (typeof jsyaml === "undefined") throw new Error("YAML parser didn't load.");
+    const p = jsyaml.load(yamlSrc);
+    if (!p || typeof p !== "object") throw new Error("Profile is empty.");
+    if (!p.id) throw new Error("Profile needs an 'id'.");
+    if (!p.name) p.name = p.id;
+    if (!p.extensions || typeof p.extensions !== "object") throw new Error("Profile needs an 'extensions' map, e.g. '.py: python'.");
+    if (!p.run || !p.run.strategy) throw new Error("Profile needs 'run.strategy' (pyodide, preview, turtle, or none).");
+    const known = ["pyodide", "preview", "turtle", "none"];
+    if (known.indexOf(p.run.strategy) < 0) {
+      throw new Error("Unknown run strategy '" + p.run.strategy + "'. Supported: " + known.join(", ") + ".");
+    }
+    if (!p.files || !Object.keys(p.files).length) p.files = { "main.txt": "" };
+    return p;
+  }
+  function registerProfile(p, isCustom, rawYaml) {
+    p.custom = !!isCustom;
+    profiles[p.id] = p;
+    if (isCustom && rawYaml) customProfileYaml[p.id] = rawYaml;
+  }
+  function loadBuiltinProfiles() {
+    BUILTIN_PROFILE_YAML.forEach((src) => {
+      try { registerProfile(parseProfile(hydrate(src)), false); }
+      catch (e) { console.error("built-in profile failed to parse", e); }
+    });
+  }
+  function profileOf(proj) {
+    const p = proj && proj.profile ? profiles[proj.profile] : null;
+    return p || profiles.blank || profiles.python;
+  }
+  function templateFiles(profileId) {
+    const p = profiles[profileId];
+    if (!p) return { "main.py": "# start here\n" };
+    const out = {};
+    Object.keys(p.files).forEach((k) => { out[k] = String(p.files[k] == null ? "" : p.files[k]); });
+    return out;
+  }
+
+  /* ======================= turtle (browser port) =======================
+     Stock turtle draws into a Tk window, which doesn't exist here. This is a
+     drop-in module that records drawing ops and paints them to a canvas.     */
+  const TURTLE_PY = String.raw`
+import math, json, js
+
+_ops = []
+_bg = "#ffffff"
+_W, _H = 640, 480
+
+def _emit(op): _ops.append(op)
+
+class Turtle(object):
+    def __init__(self):
+        self._x = 0.0; self._y = 0.0; self._h = 0.0
+        self._down = True; self._w = 1.0
+        self._pc = "#000000"; self._fc = "#000000"
+        self._visible = True
+        self._filling = False; self._fillpts = None; self._fillmark = 0
+
+    # --- movement ---
+    def _goto(self, x, y, draw=True):
+        if self._down and draw:
+            _emit({"t":"line","x1":self._x,"y1":self._y,"x2":x,"y2":y,"c":self._pc,"w":self._w})
+        self._x = float(x); self._y = float(y)
+        if self._filling: self._fillpts.append([self._x, self._y])
+
+    def forward(self, d):
+        r = math.radians(self._h)
+        self._goto(self._x + d * math.cos(r), self._y + d * math.sin(r))
+    def backward(self, d): self.forward(-d)
+    def right(self, a): self._h = (self._h - a) % 360.0
+    def left(self, a): self._h = (self._h + a) % 360.0
+    def goto(self, x, y=None):
+        if y is None: x, y = x
+        self._goto(x, y)
+    def setx(self, x): self._goto(x, self._y)
+    def sety(self, y): self._goto(self._x, y)
+    def setheading(self, a): self._h = float(a) % 360.0
+    def home(self): self._goto(0, 0); self._h = 0.0
+
+    def circle(self, radius, extent=None, steps=None):
+        if extent is None: extent = 360.0
+        if steps is None: steps = max(6, int(abs(extent) / 5.0) + 6)
+        w = float(extent) / steps
+        half = math.radians(w / 2.0)
+        chord = 2.0 * radius * math.sin(half)
+        self.left(w / 2.0)
+        for _ in range(steps):
+            r = math.radians(self._h)
+            self._goto(self._x + chord * math.cos(r), self._y + chord * math.sin(r))
+            self.left(w)
+        self.right(w / 2.0)
+
+    def dot(self, size=None, color=None):
+        size = size or max(self._w + 4, 2 * self._w)
+        _emit({"t":"dot","x":self._x,"y":self._y,"r":size/2.0,"c":color or self._pc})
+
+    def write(self, text, move=False, align="left", font=("Arial", 8, "normal")):
+        try: fam, sz = font[0], font[1]
+        except Exception: fam, sz = "Arial", 8
+        _emit({"t":"text","x":self._x,"y":self._y,"s":str(text),"c":self._pc,
+               "font":str(sz)+"px "+str(fam),"align":align})
+
+    # --- pen ---
+    def penup(self): self._down = False
+    def pendown(self): self._down = True
+    def isdown(self): return self._down
+    def pensize(self, w=None):
+        if w is None: return self._w
+        self._w = float(w)
+    def pencolor(self, *a):
+        if not a: return self._pc
+        self._pc = _color(*a)
+    def fillcolor(self, *a):
+        if not a: return self._fc
+        self._fc = _color(*a)
+    def color(self, *a):
+        if not a: return (self._pc, self._fc)
+        if len(a) == 1: self._pc = self._fc = _color(a[0])
+        else: self._pc = _color(a[0]); self._fc = _color(a[1])
+
+    def begin_fill(self):
+        self._filling = True; self._fillpts = [[self._x, self._y]]; self._fillmark = len(_ops)
+    def end_fill(self):
+        if self._filling and self._fillpts and len(self._fillpts) > 2:
+            # insert beneath the strokes drawn while filling, like real turtle
+            _ops.insert(self._fillmark, {"t":"poly","pts":self._fillpts,"c":self._fc})
+        self._filling = False; self._fillpts = None
+
+    # --- state / no-ops ---
+    def speed(self, *a): return 0
+    def hideturtle(self): self._visible = False
+    def showturtle(self): self._visible = True
+    def isvisible(self): return self._visible
+    def position(self): return (self._x, self._y)
+    def xcor(self): return self._x
+    def ycor(self): return self._y
+    def heading(self): return self._h
+    def clear(self):
+        del _ops[:]
+    def reset(self):
+        self.clear(); self.__init__()
+    def stamp(self):
+        _emit({"t":"turtle","x":self._x,"y":self._y,"h":self._h,"c":self._pc}); return 0
+    # aliases
+    fd = forward; bk = backward; back = backward; rt = right; lt = left
+    pu = penup; up = penup; pd = pendown; down = pendown
+    width = pensize; setpos = goto; setposition = goto; seth = setheading
+    pos = position; ht = hideturtle; st = showturtle
+
+def _color(*a):
+    if len(a) == 3:
+        return "rgb(%d,%d,%d)" % tuple(int(round(v * 255)) if isinstance(v, float) and v <= 1 else int(v) for v in a)
+    c = a[0]
+    if isinstance(c, (tuple, list)):
+        return _color(*c)
+    return str(c)
+
+class _Screen(object):
+    def bgcolor(self, *a):
+        global _bg
+        if not a: return _bg
+        _bg = _color(*a)
+    def setup(self, width=640, height=480, *a, **k):
+        global _W, _H
+        _W, _H = int(width), int(height)
+    def screensize(self, w=None, h=None, bg=None):
+        if w and h: self.setup(w, h)
+        if bg: self.bgcolor(bg)
+    def title(self, *a): pass
+    def tracer(self, *a, **k): pass
+    def update(self): _flush()
+    def exitonclick(self): _flush()
+    def mainloop(self): _flush()
+    def listen(self, *a, **k): pass
+    def onkey(self, *a, **k): pass
+    def onclick(self, *a, **k): pass
+
+_screen = _Screen()
+def Screen(): return _screen
+def getscreen(): return _screen
+
+_t = Turtle()
+
+def _flush():
+    payload = {"w": _W, "h": _H, "bg": _bg, "ops": list(_ops)}
+    if _t._visible:
+        payload["ops"].append({"t":"turtle","x":_t._x,"y":_t._y,"h":_t._h,"c":_t._pc})
+    js.__tinker_turtle_render(json.dumps(payload))
+
+def done(): _flush()
+mainloop = done
+exitonclick = done
+def update(): _flush()
+def tracer(*a, **k): pass
+def bye(): pass
+def bgcolor(*a): return _screen.bgcolor(*a)
+def setup(*a, **k): return _screen.setup(*a, **k)
+def screensize(*a, **k): return _screen.screensize(*a, **k)
+def title(*a): pass
+def listen(*a, **k): pass
+def onkey(*a, **k): pass
+def onclick(*a, **k): pass
+
+# module-level functions bound to the default turtle
+def _bind(name):
+    def fn(*a, **k): return getattr(_t, name)(*a, **k)
+    fn.__name__ = name
+    return fn
+
+for _n in ("forward","backward","right","left","goto","setx","sety","setheading","home",
+           "circle","dot","write","penup","pendown","isdown","pensize","pencolor",
+           "fillcolor","color","begin_fill","end_fill","speed","hideturtle","showturtle",
+           "isvisible","position","xcor","ycor","heading","clear","reset","stamp",
+           "fd","bk","back","rt","lt","pu","up","pd","down","width","setpos",
+           "setposition","seth","pos","ht","st"):
+    globals()[_n] = _bind(_n)
+`;
+
+  function installTurtleModule() {
+    try { pyodide.FS.mkdir("/tinkerlib"); } catch (e) {}
+    pyodide.FS.writeFile("/tinkerlib/turtle.py", new TextEncoder().encode(TURTLE_PY));
+    pyodide.runPython("import sys\nif '/tinkerlib' not in sys.path: sys.path.insert(0, '/tinkerlib')\nsys.modules.pop('turtle', None)");
+  }
+
+  let lastTurtlePayload = null;
+  function renderTurtle(jsonStr) {
+    let d;
+    try { d = JSON.parse(jsonStr); } catch (e) { return; }
+    lastTurtlePayload = jsonStr;
+    const cv = $("turtle-canvas");
+    const host = cv.parentElement;
+    const dpr = window.devicePixelRatio || 1;
+    const W = d.w || 640, H = d.h || 480;
+    // fit inside the panel while keeping the turtle's aspect ratio
+    const avail = host.getBoundingClientRect();
+    let scale = Math.min((avail.width - 16) / W, (avail.height - 16) / H, 1);
+    if (!isFinite(scale) || scale <= 0.05) scale = 1;   // pane hidden or tiny
+    cv.style.width = Math.round(W * scale) + "px";
+    cv.style.height = Math.round(H * scale) + "px";
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = d.bg || "#fff";
+    g.fillRect(0, 0, W, H);
+    const X = (x) => W / 2 + x, Y = (y) => H / 2 - y;
+    g.lineCap = "round"; g.lineJoin = "round";
+    (d.ops || []).forEach((o) => {
+      if (o.t === "line") {
+        g.beginPath(); g.strokeStyle = o.c; g.lineWidth = o.w;
+        g.moveTo(X(o.x1), Y(o.y1)); g.lineTo(X(o.x2), Y(o.y2)); g.stroke();
+      } else if (o.t === "poly") {
+        g.beginPath(); g.fillStyle = o.c;
+        o.pts.forEach((p, i) => { const fx = X(p[0]), fy = Y(p[1]); i ? g.lineTo(fx, fy) : g.moveTo(fx, fy); });
+        g.closePath(); g.fill();
+      } else if (o.t === "dot") {
+        g.beginPath(); g.fillStyle = o.c; g.arc(X(o.x), Y(o.y), o.r, 0, Math.PI * 2); g.fill();
+      } else if (o.t === "text") {
+        g.fillStyle = o.c; g.font = o.font || "12px Arial";
+        g.textAlign = o.align === "center" ? "center" : (o.align === "right" ? "right" : "left");
+        g.fillText(o.s, X(o.x), Y(o.y));
+      } else if (o.t === "turtle") {
+        const r = Math.PI * o.h / 180, px = X(o.x), py = Y(o.y);
+        g.save(); g.translate(px, py); g.rotate(-r);
+        g.beginPath(); g.moveTo(10, 0); g.lineTo(-6, 6); g.lineTo(-2, 0); g.lineTo(-6, -6);
+        g.closePath(); g.fillStyle = o.c || "#000"; g.fill(); g.restore();
+      }
+    });
+  }
+  window.__tinker_turtle_render = renderTurtle;
 
   /* ======================= state ======================= */
   let ws = null;                 // { projects: {name:{type,files:{}}}, active }
@@ -409,7 +800,7 @@ btn.addEventListener("click", () => {
   async function doSave() {
     if (!persistOK) { setSaveState("blocked"); return; }
     try {
-      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active }));
+      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml }));
       setSaveState("saved");
     } catch (e) {
       persistOK = false;
@@ -427,16 +818,30 @@ btn.addEventListener("click", () => {
     let data = null;
     try { data = await idbGet("workspace"); }
     catch (e) { persistOK = false; }
+    loadBuiltinProfiles();
     if (data) {
       try {
         const parsed = JSON.parse(data);
+        // re-register any custom profiles the user installed
+        if (parsed && parsed.customProfiles) {
+          Object.keys(parsed.customProfiles).forEach((id) => {
+            try { registerProfile(parseProfile(parsed.customProfiles[id]), true, parsed.customProfiles[id]); }
+            catch (e) { console.warn("dropped broken custom profile", id, e); }
+          });
+        }
         if (parsed && parsed.projects && Object.keys(parsed.projects).length) {
           ws = { projects: parsed.projects, active: parsed.active in parsed.projects ? parsed.active : Object.keys(parsed.projects)[0] };
+          // migrate v1 projects: {type} -> {profile}
+          Object.keys(ws.projects).forEach((n) => {
+            const p = ws.projects[n];
+            if (!p.profile) { p.profile = (p.type && profiles[p.type]) ? p.type : "python"; delete p.type; }
+            if (!profiles[p.profile]) p.profile = "blank";
+          });
         }
       } catch (e) { /* fall through to seed */ }
     }
     if (!ws) {
-      ws = { projects: { "hello-python": { type: "python", files: templateFiles("python") } }, active: "hello-python" };
+      ws = { projects: { "hello-python": { profile: "python", files: templateFiles("python") } }, active: "hello-python" };
     }
     // seed runtime open-tabs for the active project
     const first = Object.keys(activeProject().files)[0];
@@ -446,8 +851,12 @@ btn.addEventListener("click", () => {
 
   /* ======================= Monaco ======================= */
   function langFor(name) {
-    const e = extOf(name);
-    return ({ py:"python", js:"javascript", html:"html", css:"css", json:"json", md:"markdown", txt:"plaintext" })[e] || "plaintext";
+    const e = "." + extOf(name);
+    const p = profileOf(activeProject());
+    if (p && p.extensions && p.extensions[e]) return p.extensions[e];
+    // fall back to any registered profile that claims the extension
+    for (const id in profiles) { if (profiles[id].extensions && profiles[id].extensions[e]) return profiles[id].extensions[e]; }
+    return ({ ".py":"python", ".js":"javascript", ".html":"html", ".css":"css", ".json":"json", ".md":"markdown", ".txt":"plaintext" })[e] || "plaintext";
   }
   function modelKey(file) { return ws.active + "\u0000" + file; }
   function getModel(file) {
@@ -535,8 +944,10 @@ btn.addEventListener("click", () => {
     files.forEach((name) => {
       const row = document.createElement("div");
       row.className = "file-row" + (name === curFile() ? " active" : "");
+      const prof = profileOf(activeProject());
+      const pc = (prof.extensions && prof.extensions["." + extOf(name)]) ? (prof.color || "") : "";
       row.innerHTML =
-        '<span class="dot-ext ext-' + extOf(name) + '"></span>' +
+        '<span class="dot-ext ext-' + extOf(name) + '"' + (pc ? ' style="background:' + pc + '"' : "") + '></span>' +
         '<span class="fname"></span>' +
         '<button class="del" title="Delete">×</button>';
       row.querySelector(".fname").textContent = name;
@@ -618,34 +1029,120 @@ btn.addEventListener("click", () => {
     return (s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
   }
   function newProject() {
-    let kind = "python";
+    const ids = Object.keys(profiles);
+    let kind = ids.indexOf("python") >= 0 ? "python" : ids[0];
+    const chips = ids.map((id) => {
+      const p = profiles[id];
+      const exts = Object.keys(p.extensions || {}).join(" ");
+      return '<div class="chip' + (id === kind ? " sel" : "") + '" data-k="' + id + '">' +
+             '<span style="color:' + (p.color || "#8b93a0") + '">' + (p.icon || "\u25CF") + '</span> ' +
+             escapeHtml(p.name) + '<small>' + escapeHtml(exts) + '</small></div>';
+    }).join("");
     const body =
       '<label>Project name</label>' +
       '<input type="text" id="mp-name" placeholder="my-project" spellcheck="false" />' +
-      '<label>Template</label>' +
-      '<div class="chips" id="mp-chips">' +
-        '<div class="chip sel" data-k="python">Python<small>main.py</small></div>' +
-        '<div class="chip" data-k="web">Web<small>html · css · js</small></div>' +
-        '<div class="chip" data-k="blank">Blank<small>empty</small></div>' +
-      '</div>';
+      '<label>Profile</label>' +
+      '<div class="chips" id="mp-chips" style="flex-wrap:wrap">' + chips + '</div>';
     openModal(
-      "New project", "Pick a starting point. You can add and delete files after.",
+      "New project", "Pick a language profile. Install more from the Profiles panel.",
       body,
       () => {
         let name = slug($("mp-name").value);
         if (name in ws.projects) return "A project with that name already exists.";
-        ws.projects[name] = { type: kind, files: templateFiles(kind) };
+        ws.projects[name] = { profile: kind, files: templateFiles(kind) };
         switchProject(name);
         scheduleSave();
         return true;
       },
       () => {
-        const chips = $("mp-chips");
-        chips.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => {
-          chips.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
-          c.classList.add("sel"); kind = c.dataset.k;
+        const c = $("mp-chips");
+        c.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+          c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+          el.classList.add("sel"); kind = el.dataset.k;
         }));
         const el = $("mp-name"); if (el) el.focus();
+      }
+    );
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]);
+  }
+
+  const SAMPLE_PROFILE =
+`id: mylang
+name: My Language
+icon: "\u25C6"
+color: "#6fb3c9"
+extensions:
+  .py: python          # file extension -> Monaco grammar
+run:
+  strategy: pyodide    # pyodide | preview | turtle | none
+  entry: main.py
+files:
+  main.py: |
+    print("hello from my profile")
+`;
+
+  function showProfiles() {
+    const rows = Object.keys(profiles).map((id) => {
+      const p = profiles[id];
+      const exts = Object.keys(p.extensions || {}).join(" ");
+      return '<div class="prof-row">' +
+        '<span style="color:' + (p.color || "#8b93a0") + '">' + (p.icon || "\u25CF") + '</span>' +
+        '<div class="pmeta"><div class="pname">' + escapeHtml(p.name) + '</div>' +
+        '<div class="pdesc">' + escapeHtml(exts) + ' · runs via ' + escapeHtml(p.run.strategy) + '</div></div>' +
+        (p.custom
+          ? '<button class="btn" data-remove="' + escapeHtml(id) + '" style="padding:4px 9px">Remove</button>'
+          : '<span class="ptag">built-in</span>') +
+      '</div>';
+    }).join("");
+    const body =
+      '<div class="prof-list">' + rows + '</div>' +
+      '<label>Add a profile (YAML)</label>' +
+      '<textarea id="pf-yaml" spellcheck="false" placeholder="paste a profile…"></textarea>' +
+      '<div style="display:flex;gap:8px;margin-top:8px">' +
+        '<button class="btn" id="pf-sample" style="padding:5px 10px">Insert example</button>' +
+        '<input type="text" id="pf-url" placeholder="…or paste a URL to a .yml" spellcheck="false" style="flex:1" />' +
+        '<button class="btn" id="pf-fetch" style="padding:5px 10px">Fetch</button>' +
+      '</div>';
+    openModal(
+      "Language profiles", "A profile is one YAML file describing a language: its extensions, how to run it, and a starter template.",
+      body,
+      () => {
+        const src = ($("pf-yaml").value || "").trim();
+        if (!src) return true;   // nothing to add; just close
+        try {
+          const p = parseProfile(src);
+          registerProfile(p, true, src);
+          scheduleSave();
+          return true;
+        } catch (e) { return String((e && e.message) || e); }
+      },
+      () => {
+        $("modal-box").classList.add("wide");
+        $("modal-ok").textContent = "Install";
+        $("pf-sample").addEventListener("click", () => { $("pf-yaml").value = SAMPLE_PROFILE; });
+        $("pf-fetch").addEventListener("click", async () => {
+          const url = ($("pf-url").value || "").trim();
+          if (!url) return;
+          try {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            $("pf-yaml").value = await r.text();
+          } catch (e) {
+            $("pf-yaml").value = "# couldn't fetch: " + ((e && e.message) || e) +
+              "\n# the host must allow cross-origin requests (raw.githubusercontent.com does)";
+          }
+        });
+        $("modal-box").querySelectorAll("[data-remove]").forEach((b) => b.addEventListener("click", () => {
+          const id = b.dataset.remove;
+          const inUse = Object.keys(ws.projects).filter((n) => ws.projects[n].profile === id);
+          if (inUse.length && !confirm("Projects using it (" + inUse.join(", ") + ") will fall back to Blank. Remove anyway?")) return;
+          delete profiles[id]; delete customProfileYaml[id];
+          inUse.forEach((n) => { ws.projects[n].profile = "blank"; });
+          scheduleSave(); closeModal(); showProfiles();
+        }));
       }
     );
   }
@@ -735,7 +1232,7 @@ except Exception:
     });
   }
 
-  async function runPythonFile(path, target) {
+  async function runPythonFile(path, target, turtleMode) {
     outTarget = target;
     if (!(path in activeProject().files)) { writeErr("No such file: " + path + "\n"); return; }
     if (!pyReady) {
@@ -749,9 +1246,15 @@ except Exception:
       outTarget = target;
     }
     syncProjectToFS();
+    if (turtleMode) { try { installTurtleModule(); } catch (e) { writeErr("Couldn't install turtle module: " + e + "\n"); } }
     pyodide.globals.set("__run_target__", path);
     try { await pyodide.runPythonAsync(RUN_WRAPPER); }
     catch (e) { writeErr(String((e && e.message) || e) + "\n"); }
+    if (turtleMode) {
+      // paint whatever was drawn, even if the script never called done()
+      try { await pyodide.runPythonAsync("import sys\nif 'turtle' in sys.modules: sys.modules['turtle']._flush()"); }
+      catch (e) { /* nothing drawn */ }
+    }
     try { pyodide.globals.delete("__run_target__"); } catch (e) {}
   }
 
@@ -773,15 +1276,28 @@ except Exception:
 
   /* ======================= run dispatcher + preview ======================= */
   function runActive() {
+    const proj = activeProject();
+    const prof = profileOf(proj);
     const f = curFile();
-    if (!f) { flashConsole("Open a file first.", false); return; }
-    const e = extOf(f);
-    if (e === "py") { showPane("console"); clearConsole(); runPythonFile(f, "console"); }
-    else if (e === "html") { showPane("preview"); buildPreview(f); }
-    else if (e === "js" || e === "css") {
-      if ("index.html" in activeProject().files) { showPane("preview"); buildPreview("index.html"); }
-      else flashConsole("Nothing to run for a ." + e + " file on its own. Add an index.html and press Run there.", false);
-    } else { flashConsole("Run works on .py and .html files.", false); }
+    const strategy = (prof.run && prof.run.strategy) || "none";
+    const entry = (prof.run && prof.run.entry) || f;
+
+    if (strategy === "none") { flashConsole("This profile has no run strategy — edit it in Profiles to add one.", false); return; }
+    if (strategy === "preview") {
+      const target = (f && extOf(f) === "html") ? f : (entry in proj.files ? entry : null);
+      if (!target) { flashConsole("Nothing to preview — this project has no " + entry + ".", false); return; }
+      showPane("preview"); buildPreview(target); return;
+    }
+    if (strategy === "turtle") {
+      const target = (f && extOf(f) === "py") ? f : entry;
+      showPane("canvas"); runPythonFile(target, "console", true); return;
+    }
+    if (strategy === "pyodide") {
+      const target = (f && extOf(f) === "py") ? f : entry;
+      if (!(target in proj.files)) { flashConsole("No " + target + " in this project.", false); return; }
+      showPane("console"); clearConsole(); runPythonFile(target, "console"); return;
+    }
+    flashConsole("Unknown run strategy: " + strategy, true);
   }
   function buildPreview(entry) {
     const files = activeProject().files;
@@ -804,7 +1320,10 @@ except Exception:
     if (name === "terminal") { setTimeout(() => { try { fit.fit(); } catch (e) {} term.focus(); }, 0); }
     if (name === "preview") {
       const p = activeProject();
-      if ("index.html" in p.files) buildPreview("index.html");
+      const prof = profileOf(p);
+      const entry = (prof.run && prof.run.entry) || "index.html";
+      if (entry in p.files && extOf(entry) === "html") buildPreview(entry);
+      else if ("index.html" in p.files) buildPreview("index.html");
       else $("preview-frame").srcdoc = "<body style='font:14px system-ui;color:#8b93a0;background:#14171c;display:grid;place-items:center;height:100vh;margin:0'>Preview shows web projects — this one has no index.html.</body>";
     }
   }
@@ -934,6 +1453,7 @@ except Exception:
     $("modal-box").querySelector("h2").textContent = title;
     $("modal-box").querySelector("p").textContent = desc;
     $("modal-box").querySelector(".mbody").innerHTML = bodyHtml;
+    $("modal-box").classList.remove("wide");
     $("modal-scrim").classList.add("show");
     $("modal-cancel").addEventListener("click", closeModal);
     $("modal-ok").addEventListener("click", submitModal);
@@ -974,6 +1494,7 @@ except Exception:
     $("run-btn").addEventListener("click", runActive);
     $("new-file-btn").addEventListener("click", newFile);
     $("new-proj-btn").addEventListener("click", newProject);
+    $("profiles-btn").addEventListener("click", showProfiles);
     $("clear-console-btn").addEventListener("click", clearConsole);
     $("proj-picker").addEventListener("change", (e) => switchProject(e.target.value));
     document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
@@ -983,7 +1504,10 @@ except Exception:
       if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); doSave(); }
     });
     window.addEventListener("beforeunload", () => { if (persistOK) doSave(); });
-    window.addEventListener("resize", () => { try { fit.fit(); } catch (e) {} });
+    window.addEventListener("resize", () => {
+      try { fit.fit(); } catch (e) {}
+      if (lastTurtlePayload) renderTurtle(lastTurtlePayload);
+    });
   }
 
   async function boot() {
