@@ -419,6 +419,7 @@
     <button class="btn" id="new-proj-btn">+ New project</button>
     <button class="btn" id="profiles-btn" title="Language profiles">Profiles</button>
     <button class="btn" id="market-btn" title="Profile marketplace">Marketplace</button>
+    <button class="btn" id="runtimes-btn" title="Language runtimes">Runtimes</button>
     <button class="btn" id="settings-btn" title="Settings">Settings</button>
     <div class="topbar-spacer"></div>
     <button class="btn" id="account-btn" title="Account">Sign in</button>
@@ -466,7 +467,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 6</span>
+    <span id="build-tag">build 7</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -616,11 +617,9 @@ __BLANK_TEMPLATE__
     if (!p.id) throw new Error("Profile needs an 'id'.");
     if (!p.name) p.name = p.id;
     if (!p.extensions || typeof p.extensions !== "object") throw new Error("Profile needs an 'extensions' map, e.g. '.py: python'.");
-    if (!p.run || !p.run.strategy) throw new Error("Profile needs 'run.strategy' (pyodide, preview, turtle, or none).");
-    const known = ["pyodide", "preview", "turtle", "none"];
-    if (known.indexOf(p.run.strategy) < 0) {
-      throw new Error("Unknown run strategy '" + p.run.strategy + "'. Supported: " + known.join(", ") + ".");
-    }
+    if (!p.run || !p.run.strategy) throw new Error("Profile needs 'run.strategy' (pyodide, preview, turtle, php, or none).");
+    if (typeof p.run.strategy !== "string") throw new Error("run.strategy must be text.");
+    // built-in strategies run directly; anything else needs a linked runtime (see Runtimes).
     if (!p.files || !Object.keys(p.files).length) p.files = { "main.txt": "" };
     return p;
   }
@@ -939,7 +938,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   async function doSave() {
     if (!persistOK) { setSaveState("blocked"); return; }
     try {
-      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings }));
+      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings, runtimes: ws.runtimes || {} }));
       setSaveState("saved");
       scheduleCloudPush();
     } catch (e) {
@@ -970,8 +969,10 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
           });
         }
         if (parsed && parsed.settings) settings = Object.assign(settings, parsed.settings);
+        var savedRuntimes = (parsed && parsed.runtimes && typeof parsed.runtimes === "object") ? parsed.runtimes : null;
         if (parsed && parsed.projects && Object.keys(parsed.projects).length) {
           ws = { projects: parsed.projects, active: parsed.active in parsed.projects ? parsed.active : Object.keys(parsed.projects)[0] };
+          if (savedRuntimes) ws.runtimes = savedRuntimes;
           // migrate v1 projects: {type} -> {profile}
           Object.keys(ws.projects).forEach((n) => {
             const p = ws.projects[n];
@@ -982,10 +983,14 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
               p.mainFile = (entry && entry in p.files) ? entry : null;
             }
           });
+        } else if (savedRuntimes) {
+          // no projects but linked runtimes exist — keep them
+          window.__pendingRuntimes = savedRuntimes;
         }
       } catch (e) { /* fall through to seed */ }
     }
     if (!ws) ws = { projects: {}, active: null };
+    if (!ws.runtimes) ws.runtimes = window.__pendingRuntimes || {};
     if (ws.active && ws.projects[ws.active]) {
       const first = Object.keys(activeProject().files)[0];
       session.open[ws.active] = first ? [first] : [];
@@ -1672,15 +1677,23 @@ except Exception:
     );
   }
 
+  const BUILTIN_STRATEGIES = ["pyodide", "preview", "turtle", "none"];
   function execute(file) {
     const proj = activeProject();
     const prof = profileOf(proj);
     const strategy = (prof.run && prof.run.strategy) || "none";
     if (strategy === "preview") { showPane("preview"); buildPreview(file); return; }
-    // pyodide (and the legacy turtle strategy) — switch to canvas automatically
-    const turtle = usesTurtle(proj) || strategy === "turtle";
-    if (turtle) { showPane("canvas"); runPythonFile(file, "console", true); }
-    else { showPane("console"); clearConsole(); runPythonFile(file, "console", false); }
+    if (strategy === "pyodide" || strategy === "turtle") {
+      const turtle = usesTurtle(proj) || strategy === "turtle";
+      if (turtle) { showPane("canvas"); runPythonFile(file, "console", true); }
+      else { showPane("console"); clearConsole(); runPythonFile(file, "console", false); }
+      return;
+    }
+    // any other strategy is served by a linked runtime (e.g. php)
+    const rid = strategyRuntimeId(strategy);
+    if (!rid) { flashConsole("No runtime provides the '" + strategy + "' strategy. Open Runtimes to add one.", false); return; }
+    if (!runtimeEnabled(rid)) { promptEnableRuntime(rid, () => execute(file)); return; }
+    showPane("console"); clearConsole(); runViaPhp(file, "console", runtimeUrl(rid));
   }
   function buildPreview(entry) {
     const proj = activeProject();
@@ -1902,6 +1915,7 @@ except Exception:
         if (pick === "cloud") {
           ws.projects = cloud.projects;
           ws.active = cloud.active in cloud.projects ? cloud.active : Object.keys(cloud.projects)[0];
+          if (cloud.runtimes && typeof cloud.runtimes === "object") ws.runtimes = cloud.runtimes;
           if (cloud.customProfiles) {
             Object.keys(cloud.customProfiles).forEach((id) => {
               try { registerProfile(parseProfile(cloud.customProfiles[id]), true, cloud.customProfiles[id]); } catch (e) {}
@@ -1936,7 +1950,7 @@ except Exception:
   async function pushCloud() {
     if (!sb || !user) return;
     try {
-      const payload = { projects: ws.projects, active: ws.active, customProfiles: customProfileYaml };
+      const payload = { projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, runtimes: ws.runtimes || {} };
       const { error } = await sb.from("workspaces")
         .upsert({ user_id: user.id, data: payload, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
       if (error) throw error;
@@ -2132,6 +2146,171 @@ except Exception:
     loadMine();
   }
 
+  /* ======================= linkable runtimes =======================
+     Heavy WASM runtimes (like PHP) aren't bundled into the base app. A user
+     "links" one to their account (stored in ws.runtimes, synced across devices);
+     it only downloads when a project actually needs it. Security model: nothing
+     loads until you explicitly enable it, every source URL is shown in plain
+     sight, and it all runs in the browser's sandbox — no filesystem, no OS. */
+  const BUILTIN_RUNTIMES = {
+    php: {
+      id: "php", name: "PHP", strategy: "php", kind: "php-wasm",
+      url: "https://cdn.jsdelivr.net/npm/php-wasm/PhpWeb.mjs",
+      desc: "Real PHP 8, compiled to WebAssembly (php-wasm). ~a few MB, loads on first run.",
+      curated: true
+    }
+  };
+
+  function rtState() { return (ws && ws.runtimes) ? ws.runtimes : {}; }
+  function runtimeEnabled(id) { const s = rtState()[id]; return !!(s && s.enabled); }
+  function runtimeRecord(id) {
+    const b = BUILTIN_RUNTIMES[id], u = rtState()[id];
+    if (!b && !u) return null;
+    return Object.assign({ id: id }, b || {}, u || {});
+  }
+  function runtimeUrl(id) { const r = runtimeRecord(id); return r ? r.url : null; }
+  function setRuntimeEnabled(id, on, extra) {
+    if (!ws.runtimes) ws.runtimes = {};
+    ws.runtimes[id] = Object.assign({}, ws.runtimes[id] || {}, extra || {}, { enabled: on });
+    scheduleSave();
+  }
+  function strategyRuntimeId(strategy) {
+    for (const id in BUILTIN_RUNTIMES) if (BUILTIN_RUNTIMES[id].strategy === strategy) return id;
+    const s = rtState();
+    for (const id in s) if (s[id].strategy === strategy) return id;
+    return null;
+  }
+
+  /* --- php-wasm adapter (also drives custom php-wasm-compatible runtimes) --- */
+  const phpInstances = {};   // url -> { php, ready, dirty, promise }
+  function phpWrite(detail, isErr) {
+    let s = detail;
+    if (Array.isArray(detail)) s = detail.join("");
+    else if (typeof detail !== "string") s = String(detail == null ? "" : detail);
+    if (isErr) writeErr(s); else writeOut(s);
+  }
+  async function loadPhpRuntime(url) {
+    let slot = phpInstances[url];
+    if (slot && slot.ready) return slot.php;
+    if (slot && slot.promise) return slot.promise;
+    slot = phpInstances[url] = { php: null, ready: false, dirty: false, promise: null };
+    slot.promise = (async () => {
+      setRuntime("loading runtime…", "loading");
+      const mod = await import(/* @vite-ignore */ url);
+      const PhpWeb = mod.PhpWeb || (mod.default && mod.default.PhpWeb);
+      if (!PhpWeb) throw new Error("module has no PhpWeb export — is it php-wasm compatible?");
+      const php = new PhpWeb();
+      php.addEventListener("output", (e) => phpWrite(e.detail, false));
+      php.addEventListener("error", (e) => phpWrite(e.detail, true));
+      await new Promise((res, rej) => {
+        let ok = false;
+        php.addEventListener("ready", () => { ok = true; res(); });
+        setTimeout(() => ok || rej(new Error("runtime timed out loading")), 45000);
+      });
+      slot.php = php; slot.ready = true;
+      setRuntime("php \u00b7 ready", "ready");
+      return php;
+    })();
+    return slot.promise;
+  }
+  async function runViaPhp(path, target, url) {
+    outTarget = target;
+    const proj = activeProject();
+    if (!proj || !(path in proj.files)) { writeErr("No such file: " + path + "\n"); return; }
+    let php;
+    try { php = await loadPhpRuntime(url); }
+    catch (e) {
+      setRuntime("runtime unavailable", "");
+      const m = "Couldn't load the runtime: " + ((e && e.message) || e) +
+        "\nWASM runtimes need a real origin — a sandboxed preview can't load them. Try your deployed site.";
+      if (target === "terminal") termPrint(m, "err"); else appendConsole(m + "\n", true);
+      return;
+    }
+    const slot = phpInstances[url];
+    if (slot && slot.dirty) { try { if (typeof php.refresh === "function") await php.refresh(); } catch (e) {} }
+    if (slot) slot.dirty = true;
+    let code = proj.files[path] || "";
+    if (code.indexOf("<?") === -1) code = "<?php\n" + code;   // allow bare-body files
+    try { await php.run(code); }
+    catch (e) { writeErr(String((e && e.message) || e) + "\n"); }
+  }
+
+  function promptEnableRuntime(id, then) {
+    const r = runtimeRecord(id) || { name: id, url: "" };
+    openModal(
+      "Enable the " + escapeHtml(r.name || id) + " runtime?",
+      "This project runs on a WebAssembly runtime that isn't linked to your account yet.",
+      '<div class="prof-row"><div class="pmeta">' +
+        '<div class="pname">' + escapeHtml(r.name || id) + '</div>' +
+        '<div class="pdesc">' + escapeHtml(r.desc || ("provides the '" + (r.strategy || "?") + "' strategy")) + '</div>' +
+        '<div class="pdesc" style="color:var(--faint);word-break:break-all;margin-top:3px">loads: ' + escapeHtml(r.url || "") + '</div>' +
+      '</div></div>' +
+      '<p style="font-size:11.5px;color:var(--faint);margin:12px 0 0">It runs sandboxed in your browser and can\'t reach your files or OS. Only enable runtimes you trust.</p>',
+      () => { setRuntimeEnabled(id, true); if (then) then(); return true; },
+      () => { $("modal-ok").textContent = "Enable & run"; }
+    );
+  }
+
+  function showRuntimes() {
+    const seen = {};
+    const rowFor = (id) => {
+      const r = runtimeRecord(id); if (!r) return "";
+      seen[id] = true;
+      const on = runtimeEnabled(id);
+      return '<div class="prof-row">' +
+        '<div class="pmeta">' +
+          '<div class="pname">' + escapeHtml(r.name || id) +
+            (r.curated ? ' <span class="ptag">curated</span>' : ' <span class="ptag">custom</span>') + '</div>' +
+          '<div class="pdesc">' + escapeHtml(r.desc || ("strategy: " + (r.strategy || "?"))) + '</div>' +
+          '<div class="pdesc" style="color:var(--faint);word-break:break-all">' + escapeHtml(r.url || "") + '</div>' +
+        '</div>' +
+        '<button class="btn' + (on ? "" : " primary") + '" data-toggle="' + escapeHtml(id) + '" style="padding:4px 10px">' + (on ? "Disable" : "Enable") + '</button>' +
+        (r.custom ? '<button class="btn danger" data-rmrt="' + escapeHtml(id) + '" style="padding:4px 8px;margin-left:6px">Remove</button>' : '') +
+      '</div>';
+    };
+    const rows = [];
+    Object.keys(BUILTIN_RUNTIMES).forEach((id) => rows.push(rowFor(id)));
+    Object.keys(rtState()).forEach((id) => { if (!seen[id] && rtState()[id].custom) rows.push(rowFor(id)); });
+
+    const body =
+      '<div class="prof-list">' + rows.join("") + '</div>' +
+      '<details style="margin-top:6px"><summary style="cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--dim)">Add a custom runtime (advanced)</summary>' +
+        '<p style="font-size:11.5px;color:var(--danger);margin:10px 0 8px">This loads and runs third-party code in your browser sandbox. It can\'t reach your files or OS, but only add URLs you trust. Custom runtimes must expose the php-wasm interface.</p>' +
+        '<label>Name</label><input type="text" id="rt-name" placeholder="My PHP build" spellcheck="false" />' +
+        '<label>Strategy id (what profiles put in run.strategy)</label><input type="text" id="rt-strat" placeholder="php-custom" spellcheck="false" />' +
+        '<label>Module URL (https, .mjs)</label><input type="text" id="rt-url" placeholder="https://cdn.jsdelivr.net/npm/php-wasm/PhpWeb.mjs" spellcheck="false" />' +
+        '<div style="margin-top:10px"><button class="btn" id="rt-add">Add &amp; enable</button> <span id="rt-msg" style="font-size:12px;color:var(--dim);margin-left:8px"></span></div>' +
+      '</details>';
+
+    openModal(
+      "Runtimes",
+      "Link language runtimes to your account. They sync across your devices and only download when a project needs them.",
+      body, () => true,
+      () => {
+        $("modal-box").classList.add("wide");
+        $("modal-ok").textContent = "Close";
+        $("modal-box").querySelectorAll("[data-toggle]").forEach((b) => b.addEventListener("click", () => {
+          const id = b.dataset.toggle; setRuntimeEnabled(id, !runtimeEnabled(id)); closeModal(); showRuntimes();
+        }));
+        $("modal-box").querySelectorAll("[data-rmrt]").forEach((b) => b.addEventListener("click", () => {
+          const id = b.dataset.rmrt; if (ws.runtimes) delete ws.runtimes[id]; scheduleSave(); closeModal(); showRuntimes();
+        }));
+        const add = $("rt-add");
+        if (add) add.addEventListener("click", () => {
+          const name = ($("rt-name").value || "").trim(), strat = ($("rt-strat").value || "").trim(), url = ($("rt-url").value || "").trim();
+          const msg = $("rt-msg");
+          if (!name || !strat || !url) { msg.textContent = "fill in all three"; return; }
+          if (!/^https:\/\//i.test(url)) { msg.textContent = "URL must start with https://"; return; }
+          if (BUILTIN_STRATEGIES.indexOf(strat) >= 0) { msg.textContent = "'" + strat + "' is a built-in strategy — pick another id"; return; }
+          const id = "rt_" + slug(name) + "_" + slug(strat);
+          if (!ws.runtimes) ws.runtimes = {};
+          ws.runtimes[id] = { enabled: true, url: url, name: name, strategy: strat, kind: "php-wasm", custom: true };
+          scheduleSave(); closeModal(); showRuntimes();
+        });
+      }
+    );
+  }
+
   /* ======================= landing (signed out) ======================= */
   let typeTimer = null, landingTyped = false, typeRun = 0;
   const LAND_SNIPPET = [
@@ -2269,6 +2448,7 @@ except Exception:
     $("profiles-btn").addEventListener("click", showProfiles);
     $("settings-btn").addEventListener("click", showSettings);
     $("market-btn").addEventListener("click", showMarket);
+    $("runtimes-btn").addEventListener("click", showRuntimes);
     $("account-btn").addEventListener("click", showAccount);
     $("clear-console-btn").addEventListener("click", clearConsole);
     $("proj-picker").addEventListener("change", (e) => { if (e.target.value) switchProject(e.target.value); });
