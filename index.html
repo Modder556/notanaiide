@@ -239,6 +239,7 @@
     .sb-dot.loading { animation: pulse 1.2s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: .35; } }
   }
+  #build-tag { color: var(--faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; }
   #save-state.warn { color: var(--accent); }
 
   /* modal */
@@ -279,6 +280,7 @@
     <div class="proj-select">
       <label>project</label>
       <select id="proj-picker" title="Switch project"></select>
+      <button class="icon-btn" id="del-proj-btn" title="Delete this project">×</button>
     </div>
     <button class="btn" id="new-proj-btn">+ New project</button>
     <button class="btn" id="profiles-btn" title="Language profiles">Profiles</button>
@@ -330,6 +332,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
+    <span id="build-tag">build 5</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -1025,6 +1028,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     if (ed) ed.style.display = has ? "" : "none";
     const run = $("run-btn"); if (run) run.disabled = !has;
     const nf = $("new-file-btn"); if (nf) nf.disabled = !has;
+    const dp = $("del-proj-btn"); if (dp) dp.disabled = !has;
   }
 
   function renderSidebar() {
@@ -2059,6 +2063,7 @@ except Exception:
     $("clear-console-btn").addEventListener("click", clearConsole);
     $("proj-picker").addEventListener("change", (e) => { if (e.target.value) switchProject(e.target.value); });
     $("np-create").addEventListener("click", newProject);
+    $("del-proj-btn").addEventListener("click", () => { if (ws.active) deleteProject(ws.active); });
     document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
     $("modal-scrim").addEventListener("mousedown", (e) => { if (e.target === $("modal-scrim")) closeModal(); });
     document.addEventListener("keydown", (e) => {
