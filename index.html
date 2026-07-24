@@ -12,6 +12,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 <script src="https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.53.0/min/vs/loader.js"></script>
 
 <style>
@@ -275,8 +276,10 @@
     </div>
     <button class="btn" id="new-proj-btn">+ New project</button>
     <button class="btn" id="profiles-btn" title="Language profiles">Profiles</button>
+    <button class="btn" id="market-btn" title="Profile marketplace">Marketplace</button>
     <button class="btn" id="settings-btn" title="Settings">Settings</button>
     <div class="topbar-spacer"></div>
+    <button class="btn" id="account-btn" title="Account">Sign in</button>
     <button class="btn primary" id="run-btn" title="Run (Ctrl/Cmd + Enter)">▶ Run</button>
   </div>
 
@@ -815,6 +818,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     try {
       await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings }));
       setSaveState("saved");
+      scheduleCloudPush();
     } catch (e) {
       persistOK = false;
       setSaveState("blocked");
@@ -1600,6 +1604,293 @@ except Exception:
     }
   }
 
+  /* ======================= cloud: accounts + marketplace =======================
+     The publishable key is meant to live in client code; the database enforces
+     access with Row Level Security, so a stranger with this key can't do damage. */
+  const SUPA_URL_DEFAULT = "https://eponwqfscmdzpvbdebca.supabase.co";
+  const SUPA_KEY_DEFAULT = "sb_publishable_aPLYn289ixKhM5tH8CuyhQ_dExgMR2d";
+
+  let sb = null, user = null, cloudTimer = null;
+
+  function supaUrl() { return (settings.supaUrl || SUPA_URL_DEFAULT).trim(); }
+  function supaKey() { return (settings.supaKey || SUPA_KEY_DEFAULT).trim(); }
+
+  function initCloud() {
+    if (typeof window.supabase === "undefined" || !window.supabase.createClient) return;
+    if (!supaUrl() || !supaKey()) return;
+    try { sb = window.supabase.createClient(supaUrl(), supaKey()); }
+    catch (e) { console.error("supabase init failed", e); return; }
+    sb.auth.getSession().then(({ data }) => setUser(data && data.session ? data.session.user : null))
+      .catch(() => {});
+    sb.auth.onAuthStateChange((_evt, session) => setUser(session ? session.user : null));
+  }
+
+  function setUser(u) {
+    const was = user && user.id;
+    user = u;
+    const btn = $("account-btn");
+    if (btn) btn.textContent = u ? (u.email || "account").split("@")[0] : "Sign in";
+    if (u && u.id !== was) onSignedIn();
+  }
+
+  async function onSignedIn() {
+    try {
+      const { data, error } = await sb.from("workspaces").select("data").eq("user_id", user.id).maybeSingle();
+      if (error) throw error;
+      if (data && data.data && data.data.projects && Object.keys(data.data.projects).length) {
+        askCloudMerge(data.data);
+      } else {
+        pushCloud();
+      }
+    } catch (e) { console.warn("cloud pull failed", e); }
+  }
+
+  function askCloudMerge(cloud) {
+    const cloudNames = Object.keys(cloud.projects);
+    const localNames = Object.keys(ws.projects);
+    openModal(
+      "You have projects in the cloud",
+      "Pick which set to keep. The other is replaced, so choose carefully.",
+      '<div class="chips" id="cm-chips" style="flex-wrap:wrap">' +
+        '<div class="chip sel" data-c="cloud">Use cloud<small>' + cloudNames.length + ' project(s)</small></div>' +
+        '<div class="chip" data-c="local">Keep this device<small>' + localNames.length + ' project(s)</small></div>' +
+      '</div>' +
+      '<p style="margin:12px 0 0;font-size:11.5px;color:var(--faint)">Cloud: ' + escapeHtml(cloudNames.join(", ")) + '<br>This device: ' + escapeHtml(localNames.join(", ")) + '</p>',
+      () => {
+        const pick = $("cm-chips").querySelector(".chip.sel").dataset.c;
+        if (pick === "cloud") {
+          ws.projects = cloud.projects;
+          ws.active = cloud.active in cloud.projects ? cloud.active : Object.keys(cloud.projects)[0];
+          if (cloud.customProfiles) {
+            Object.keys(cloud.customProfiles).forEach((id) => {
+              try { registerProfile(parseProfile(cloud.customProfiles[id]), true, cloud.customProfiles[id]); } catch (e) {}
+            });
+          }
+          session.open = {}; session.current = {};
+          const first = Object.keys(activeProject().files)[0];
+          session.open[ws.active] = first ? [first] : [];
+          session.current[ws.active] = first || null;
+          renderProjectPicker(); renderSidebar(); renderTabs();
+          if (first) openFile(first); else showEditorEmpty();
+          doSave();
+        } else { pushCloud(); }
+        return true;
+      },
+      () => {
+        $("modal-ok").textContent = "Continue";
+        const c = $("cm-chips");
+        c.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+          c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+          el.classList.add("sel");
+        }));
+      }
+    );
+  }
+
+  function scheduleCloudPush() {
+    if (!sb || !user) return;
+    clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(pushCloud, 2500);
+  }
+  async function pushCloud() {
+    if (!sb || !user) return;
+    try {
+      const payload = { projects: ws.projects, active: ws.active, customProfiles: customProfileYaml };
+      const { error } = await sb.from("workspaces")
+        .upsert({ user_id: user.id, data: payload, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+      if (error) throw error;
+    } catch (e) { console.warn("cloud push failed", e); }
+  }
+
+  /* ---------- account modal ---------- */
+  function showAccount() {
+    if (!sb) {
+      openModal("Accounts unavailable", "The Supabase client didn't load, or no project is configured in Settings.",
+        '<p style="font-size:12px;color:var(--dim);margin:0">Check your connection, then reload.</p>',
+        () => true, () => { $("modal-ok").textContent = "Close"; });
+      return;
+    }
+    if (user) {
+      openModal("Signed in", escapeHtml(user.email || ""),
+        '<p style="font-size:12.5px;color:var(--dim);margin:0 0 14px">Your projects and profiles sync to the cloud automatically.</p>' +
+        '<button class="btn" id="ac-signout">Sign out</button>' +
+        '<button class="btn" id="ac-syncnow" style="margin-left:8px">Sync now</button>',
+        () => true,
+        () => {
+          $("modal-ok").textContent = "Close";
+          $("ac-signout").addEventListener("click", async () => { await sb.auth.signOut(); user = null; setUser(null); closeModal(); });
+          $("ac-syncnow").addEventListener("click", async () => { await pushCloud(); $("ac-syncnow").textContent = "Synced"; });
+        });
+      return;
+    }
+    let mode = "signin";
+    openModal(
+      "Account", "Sign in to sync your projects and publish profiles.",
+      '<div class="chips" id="au-mode">' +
+        '<div class="chip sel" data-m="signin">Sign in</div>' +
+        '<div class="chip" data-m="signup">Create account</div>' +
+      '</div>' +
+      '<label>Email</label><input type="text" id="au-email" spellcheck="false" placeholder="you@example.com" />' +
+      '<label>Password</label><input type="password" id="au-pass" placeholder="at least 6 characters" />',
+      async () => {
+        const email = ($("au-email").value || "").trim();
+        const pass = $("au-pass").value || "";
+        if (!email || !pass) return "Enter an email and password.";
+        if (mode === "signup") {
+          const { data, error } = await sb.auth.signUp({ email: email, password: pass });
+          if (error) return error.message;
+          if (!data.session) return "Account created — check your email to confirm, then sign in.";
+          return true;
+        }
+        const { error } = await sb.auth.signInWithPassword({ email: email, password: pass });
+        if (error) return error.message;
+        return true;
+      },
+      () => {
+        $("modal-ok").textContent = "Go";
+        const c = $("au-mode");
+        c.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+          c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+          el.classList.add("sel"); mode = el.dataset.m;
+        }));
+        $("au-email").focus();
+      }
+    );
+  }
+
+  /* ---------- marketplace ---------- */
+  let mkCache = [];
+  function showMarket() {
+    openModal(
+      "Profile marketplace", "Community language profiles. Anyone can browse; sign in to publish.",
+      '<div class="chips" id="mk-tabs" style="margin-bottom:4px">' +
+        '<div class="chip sel" data-t="browse">Browse</div>' +
+        '<div class="chip" data-t="publish">Publish</div>' +
+      '</div>' +
+      '<div id="mk-body"><div class="pdesc" style="padding:12px 0;color:var(--faint);font-family:var(--mono);font-size:12px">Loading…</div></div>',
+      () => true,
+      () => {
+        $("modal-box").classList.add("wide");
+        $("modal-ok").textContent = "Close";
+        const t = $("mk-tabs");
+        t.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+          t.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+          el.classList.add("sel");
+          el.dataset.t === "browse" ? renderBrowse() : renderPublish();
+        }));
+        renderBrowse();
+      }
+    );
+  }
+
+  async function renderBrowse() {
+    const body = $("mk-body");
+    if (!body) return;
+    body.innerHTML = '<input type="text" id="mk-search" placeholder="search profiles…" spellcheck="false" style="width:100%;margin-bottom:10px" />' +
+                     '<div class="prof-list" id="mk-list">loading…</div>';
+    const list = $("mk-list");
+    if (!sb) { list.innerHTML = '<p style="color:var(--faint);font-size:12px">Cloud unavailable — check your connection.</p>'; return; }
+    try {
+      const { data, error } = await sb.from("marketplace_profiles")
+        .select("id,slug,name,description,yaml,author_name,downloads,created_at")
+        .order("downloads", { ascending: false }).limit(100);
+      if (error) throw error;
+      mkCache = data || [];
+    } catch (e) {
+      list.innerHTML = '<p style="color:var(--danger);font-size:12px">Couldn\'t load: ' + escapeHtml((e && e.message) || e) +
+        '<br><span style="color:var(--faint)">If this says the table is missing, run the setup SQL in Supabase first.</span></p>';
+      return;
+    }
+    const draw = (q) => {
+      const rows = mkCache.filter((r) => !q ||
+        (r.name + " " + (r.description || "") + " " + (r.author_name || "")).toLowerCase().indexOf(q.toLowerCase()) >= 0);
+      if (!rows.length) { list.innerHTML = '<p style="color:var(--faint);font-size:12px">Nothing published yet — be the first.</p>'; return; }
+      list.innerHTML = rows.map((r) =>
+        '<div class="prof-row">' +
+          '<div class="pmeta">' +
+            '<div class="pname">' + escapeHtml(r.name) + '</div>' +
+            '<div class="pdesc">' + escapeHtml(r.description || "no description") + ' · by ' + escapeHtml(r.author_name || "anon") + ' · ' + (r.downloads || 0) + ' installs</div>' +
+          '</div>' +
+          '<button class="btn" data-install="' + escapeHtml(r.id) + '" style="padding:4px 9px">Install</button>' +
+          (user ? '' : '') +
+        '</div>').join("");
+      list.querySelectorAll("[data-install]").forEach((b) => b.addEventListener("click", async () => {
+        const rec = mkCache.filter((x) => x.id === b.dataset.install)[0];
+        if (!rec) return;
+        try {
+          const p = parseProfile(rec.yaml);
+          registerProfile(p, true, rec.yaml);
+          scheduleSave();
+          b.textContent = "Installed"; b.disabled = true;
+          try { await sb.rpc("bump_downloads", { p_id: rec.id }); } catch (e) {}
+        } catch (e) { b.textContent = "Bad YAML"; }
+      }));
+    };
+    draw("");
+    $("mk-search").addEventListener("input", (e) => draw(e.target.value));
+  }
+
+  async function renderPublish() {
+    const body = $("mk-body");
+    if (!body) return;
+    if (!user) {
+      body.innerHTML = '<p style="font-size:12.5px;color:var(--dim)">Sign in to publish a profile.</p>' +
+        '<button class="btn" id="mk-signin">Sign in</button>';
+      $("mk-signin").addEventListener("click", () => { closeModal(); showAccount(); });
+      return;
+    }
+    const ids = Object.keys(profiles);
+    body.innerHTML =
+      '<label>Profile to publish</label>' +
+      '<select id="mk-pick" style="width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:7px;padding:9px 10px;color:var(--text);font-family:var(--mono);font-size:13px">' +
+        ids.map((id) => '<option value="' + escapeHtml(id) + '">' + escapeHtml(profiles[id].name) + '</option>').join("") +
+      '</select>' +
+      '<label>Short description</label>' +
+      '<input type="text" id="mk-desc" placeholder="what this profile is for" spellcheck="false" />' +
+      '<label>Publish as</label>' +
+      '<input type="text" id="mk-author" placeholder="your display name" spellcheck="false" value="' + escapeHtml((user.email || "").split("@")[0]) + '" />' +
+      '<div style="margin-top:14px"><button class="btn primary" id="mk-go">Publish</button> <span id="mk-msg" style="font-size:12px;color:var(--dim);margin-left:8px"></span></div>' +
+      '<div style="margin-top:18px"><label>Your published profiles</label><div class="prof-list" id="mk-mine">loading…</div></div>';
+
+    $("mk-go").addEventListener("click", async () => {
+      const id = $("mk-pick").value;
+      const p = profiles[id];
+      const msg = $("mk-msg");
+      const raw = customProfileYaml[id] || hydrate(BUILTIN_PROFILE_YAML.filter((s) => s.indexOf("id: " + id + "\n") === 0)[0] || "");
+      if (!raw) { msg.textContent = "couldn't find that profile's YAML"; return; }
+      msg.textContent = "publishing…";
+      try {
+        const { error } = await sb.from("marketplace_profiles").insert({
+          slug: id, name: p.name, description: ($("mk-desc").value || "").trim(),
+          yaml: raw, author_id: user.id, author_name: ($("mk-author").value || "anon").trim()
+        });
+        if (error) throw error;
+        msg.textContent = "published";
+        loadMine();
+      } catch (e) { msg.textContent = (e && e.message) || String(e); }
+    });
+
+    async function loadMine() {
+      const host = $("mk-mine");
+      if (!host) return;
+      try {
+        const { data, error } = await sb.from("marketplace_profiles")
+          .select("id,name,downloads").eq("author_id", user.id).order("created_at", { ascending: false });
+        if (error) throw error;
+        if (!data.length) { host.innerHTML = '<p style="color:var(--faint);font-size:12px">Nothing published yet.</p>'; return; }
+        host.innerHTML = data.map((r) =>
+          '<div class="prof-row"><div class="pmeta"><div class="pname">' + escapeHtml(r.name) + '</div>' +
+          '<div class="pdesc">' + (r.downloads || 0) + ' installs</div></div>' +
+          '<button class="btn" data-unpub="' + escapeHtml(r.id) + '" style="padding:4px 9px">Remove</button></div>').join("");
+        host.querySelectorAll("[data-unpub]").forEach((b) => b.addEventListener("click", async () => {
+          await sb.from("marketplace_profiles").delete().eq("id", b.dataset.unpub);
+          loadMine();
+        }));
+      } catch (e) { host.innerHTML = '<p style="color:var(--danger);font-size:12px">' + escapeHtml((e && e.message) || e) + '</p>'; }
+    }
+    loadMine();
+  }
+
   /* ======================= modal ======================= */
   let modalSubmit = null;
   function openModal(title, desc, bodyHtml, onSubmit, afterOpen) {
@@ -1621,9 +1912,14 @@ except Exception:
       inp.addEventListener("keydown", (e) => { if (e.key === "Enter") submitModal(); }));
     if (afterOpen) afterOpen();
   }
-  function submitModal() {
+  async function submitModal() {
     if (!modalSubmit) return;
-    const res = modalSubmit();
+    const btn = $("modal-ok");
+    if (btn) btn.disabled = true;
+    let res;
+    try { res = await modalSubmit(); }
+    catch (e) { res = String((e && e.message) || e); }
+    if (btn) btn.disabled = false;
     if (res === true) closeModal();
     else if (typeof res === "string") {
       let e = $("modal-box").querySelector(".modal-err");
@@ -1656,6 +1952,8 @@ except Exception:
     $("new-proj-btn").addEventListener("click", newProject);
     $("profiles-btn").addEventListener("click", showProfiles);
     $("settings-btn").addEventListener("click", showSettings);
+    $("market-btn").addEventListener("click", showMarket);
+    $("account-btn").addEventListener("click", showAccount);
     $("clear-console-btn").addEventListener("click", clearConsole);
     $("proj-picker").addEventListener("change", (e) => switchProject(e.target.value));
     document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
@@ -1684,6 +1982,7 @@ except Exception:
       const h = $("editor"); h.classList.remove("empty"); h.textContent = "Editor failed to load — check your connection, or deploy the file.";
     }
     ensurePyodide().catch(() => {});   // warm up Python in the background
+    try { initCloud(); } catch (e) { console.error("cloud init failed", e); }
   }
   boot();
 })();
