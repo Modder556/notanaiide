@@ -149,6 +149,10 @@
 
   #editor { flex: 1; min-height: 0; }
   #editor.empty { display: grid; place-items: center; color: var(--faint); font-family: var(--mono); font-size: 13px; }
+  #no-project { flex: 1; display: none; place-items: center; min-height: 0; }
+  .np-inner { text-align: center; }
+  .np-title { font-family: var(--mono); font-size: 14px; color: var(--dim); margin-bottom: 4px; }
+  .np-sub { font-size: 12.5px; color: var(--faint); margin-bottom: 16px; }
   #fb-note {
     padding: 7px 12px; font-size: 12px; color: var(--accent);
     background: #241f16; border-bottom: 1px solid var(--border);
@@ -295,6 +299,13 @@
     <div id="editor-col">
       <div id="tabs"></div>
       <div id="editor" class="empty">Loading editor…</div>
+      <div id="no-project">
+        <div class="np-inner">
+          <div class="np-title">No projects yet</div>
+          <div class="np-sub">Create one to start writing code.</div>
+          <button class="btn primary" id="np-create">+ New project</button>
+        </div>
+      </div>
       <div id="divider"></div>
       <div id="panel">
         <div id="panel-tabs">
@@ -388,22 +399,6 @@ btn.addEventListener("click", () => {
   count.textContent = taps + (taps === 1 ? " tap" : " taps");
 });
 `;
-  T.turtle =
-`# Turtle graphics — draws to the Canvas panel.
-# Press Run (Ctrl/Cmd + Enter).
-from turtle import *
-
-pensize(2)
-colors = ["#e8a94b", "#6fb3c9", "#d9705f", "#a888d8", "#7fb37a"]
-
-for i in range(60):
-    pencolor(colors[i % len(colors)])
-    forward(i * 4)
-    right(59)
-
-hideturtle()
-done()
-`;
 
   /* ======================= language profiles =======================
      A profile is data, not code. Anything the IDE knows about a language
@@ -442,19 +437,6 @@ __WEB_CSS__
   script.js: |
 __WEB_JS__
 `,
-`id: turtle
-name: Turtle
-icon: "\u25B2"
-color: "#7fb37a"
-extensions:
-  .py: python
-run:
-  strategy: pyodide
-  entry: main.py
-files:
-  main.py: |
-__TURTLE_TEMPLATE__
-`,
 `id: blank
 name: Blank
 icon: "\u25CB"
@@ -482,7 +464,6 @@ __BLANK_TEMPLATE__
       .replace("__WEB_HTML__", indentBlock(T.webHtml, "    "))
       .replace("__WEB_CSS__", indentBlock(T.webCss, "    "))
       .replace("__WEB_JS__", indentBlock(T.webJs, "    "))
-      .replace("__TURTLE_TEMPLATE__", indentBlock(T.turtle, "    "))
       .replace("__BLANK_TEMPLATE__", indentBlock("# start here\n", "    "));
   }
 
@@ -773,9 +754,12 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   let settings = { alwaysAsk: false };
 
   const $ = (id) => document.getElementById(id);
-  const activeProject = () => ws.projects[ws.active];
-  const curFile = () => session.current[ws.active] || null;
-  const openList = () => session.open[ws.active] || (session.open[ws.active] = []);
+  const activeProject = () => (ws && ws.active && ws.projects[ws.active]) ? ws.projects[ws.active] : null;
+  const curFile = () => (ws && ws.active) ? (session.current[ws.active] || null) : null;
+  const openList = () => {
+    if (!ws || !ws.active) return [];
+    return session.open[ws.active] || (session.open[ws.active] = []);
+  };
   const extOf = (n) => (n.split(".").pop() || "").toLowerCase();
 
   /* ======================= persistence (IndexedDB, best-effort) ======================= */
@@ -862,13 +846,12 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
         }
       } catch (e) { /* fall through to seed */ }
     }
-    if (!ws) {
-      ws = { projects: { "hello-python": { profile: "python", mainFile: "main.py", files: templateFiles("python") } }, active: "hello-python" };
+    if (!ws) ws = { projects: {}, active: null };
+    if (ws.active && ws.projects[ws.active]) {
+      const first = Object.keys(activeProject().files)[0];
+      session.open[ws.active] = first ? [first] : [];
+      session.current[ws.active] = first || null;
     }
-    // seed runtime open-tabs for the active project
-    const first = Object.keys(activeProject().files)[0];
-    session.open[ws.active] = first ? [first] : [];
-    session.current[ws.active] = first || null;
   }
 
   /* ======================= Monaco ======================= */
@@ -1008,9 +991,21 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   }
 
   /* ======================= sidebar + tabs ======================= */
+  function syncChrome() {
+    const has = !!activeProject();
+    const np = $("no-project"), ed = $("editor");
+    if (np) np.style.display = has ? "none" : "grid";
+    if (ed) ed.style.display = has ? "" : "none";
+    const run = $("run-btn"); if (run) run.disabled = !has;
+    const nf = $("new-file-btn"); if (nf) nf.disabled = !has;
+  }
+
   function renderSidebar() {
     const list = $("file-list"); list.innerHTML = "";
-    const files = Object.keys(activeProject().files).sort();
+    syncChrome();
+    const proj = activeProject();
+    if (!proj) return;
+    const files = Object.keys(proj.files).sort();
     files.forEach((name) => {
       const row = document.createElement("div");
       row.className = "file-row" + (name === curFile() ? " active" : "");
@@ -1040,7 +1035,13 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   }
   function renderProjectPicker() {
     const sel = $("proj-picker"); sel.innerHTML = "";
-    Object.keys(ws.projects).forEach((name) => {
+    const names = Object.keys(ws.projects);
+    if (!names.length) {
+      const o = document.createElement("option");
+      o.textContent = "— none —"; o.value = ""; sel.appendChild(o);
+      return;
+    }
+    names.forEach((name) => {
       const o = document.createElement("option");
       o.value = name; o.textContent = name; o.selected = name === ws.active;
       sel.appendChild(o);
@@ -1049,7 +1050,8 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
 
   /* ======================= file / project ops ======================= */
   function openFile(name) {
-    if (!(name in activeProject().files)) return;
+    const proj = activeProject();
+    if (!proj || !(name in proj.files)) return;
     session.current[ws.active] = name;
     const ol = openList();
     if (!ol.includes(name)) ol.push(name);
@@ -1071,6 +1073,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     } else { renderTabs(); }
   }
   function newFile() {
+    if (!activeProject()) { newProject(); return; }
     openModal(
       "New file",
       "Name it with an extension — .py, .html, .css, .js, .json, .txt.",
@@ -1087,6 +1090,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     );
   }
   function deleteFile(name) {
+    if (!activeProject()) return;
     const files = activeProject().files;
     if (Object.keys(files).length <= 1) { flashConsole("Can't delete the last file in a project.", true); return; }
     if (!confirm('Delete "' + name + '"? This can\'t be undone.')) return;
@@ -1164,6 +1168,12 @@ files:
 
   function showSettings() {
     const proj = activeProject();
+    if (!proj) {
+      openModal("Settings", "Create a project first — run settings are per project.",
+        '<p style="font-size:12.5px;color:var(--dim);margin:0">Nothing to configure yet.</p>',
+        () => true, () => { $("modal-ok").textContent = "Close"; });
+      return;
+    }
     const cands = runnableFiles(proj);
     let mode = settings.alwaysAsk ? "ask" : "main";
     let main = proj.mainFile && cands.indexOf(proj.mainFile) >= 0 ? proj.mainFile : "";
@@ -1335,7 +1345,9 @@ except Exception:
 `;
 
   function syncProjectToFS() {
-    const files = activeProject().files;
+    const proj = activeProject();
+    if (!proj) return;
+    const files = proj.files;
     try { pyodide.FS.mkdir("/project"); } catch (e) {}
     // remove stale files so deleted modules don't linger
     let existing = [];
@@ -1349,7 +1361,8 @@ except Exception:
 
   async function runPythonFile(path, target, turtleMode) {
     outTarget = target;
-    if (!(path in activeProject().files)) { writeErr("No such file: " + path + "\n"); return; }
+    const proj = activeProject();
+    if (!proj || !(path in proj.files)) { writeErr("No such file: " + path + "\n"); return; }
     if (!pyReady) {
       (target === "terminal" ? termNote : (m) => appendConsole(m + "\n", false))("Loading Python runtime… (first run downloads a few MB)");
       try { await ensurePyodide(); }
@@ -1403,8 +1416,24 @@ except Exception:
     return Object.keys(proj.files).filter((n) => extOf(n) === want).sort();
   }
 
+  /* Running requires an account. Note this is a product gate, not a security
+     boundary — the code is client-side, so it's about tying usage to accounts. */
+  function requireSignIn(what) {
+    if (user) return true;
+    if (!sb) {
+      flashConsole("Can't verify sign-in — the accounts service didn't load. Check your connection and reload.", true);
+      return false;
+    }
+    showPane("console");
+    appendConsole("Sign in to " + what + ".\n", false);
+    showAccount();
+    return false;
+  }
+
   function runActive() {
     const proj = activeProject();
+    if (!proj) { newProject(); return; }
+    if (!requireSignIn("run code")) return;
     const prof = profileOf(proj);
     const strategy = (prof.run && prof.run.strategy) || "none";
     if (strategy === "none") { flashConsole("This profile has no run strategy — edit it in Profiles to add one.", false); return; }
@@ -1458,7 +1487,9 @@ except Exception:
     else { showPane("console"); clearConsole(); runPythonFile(file, "console", false); }
   }
   function buildPreview(entry) {
-    const files = activeProject().files;
+    const proj = activeProject();
+    if (!proj) return;
+    const files = proj.files;
     let html = files[entry] != null ? files[entry] : "<!-- missing " + entry + " -->";
     html = html.replace(/<link\b[^>]*href=["']([^"']+\.css)["'][^>]*>/gi, (m, href) => {
       const css = files[href.replace(/^\.\//, "")];
@@ -1478,6 +1509,7 @@ except Exception:
     if (name === "terminal") { setTimeout(() => { try { fit.fit(); } catch (e) {} term.focus(); }, 0); }
     if (name === "preview") {
       const p = activeProject();
+      if (!p) { $("preview-frame").srcdoc = ""; return; }
       const prof = profileOf(p);
       const entry = (prof.run && prof.run.entry) || "index.html";
       if (entry in p.files && extOf(entry) === "html") buildPreview(entry);
@@ -1558,7 +1590,17 @@ except Exception:
     const parts = line.trim().split(/\s+/).filter(Boolean);
     if (!parts.length) return;
     const cmd = parts[0], args = parts.slice(1);
-    const files = activeProject().files;
+    const proj = activeProject();
+    if (!proj && ["ls", "cat", "python", "python3", "pip", "pip3"].indexOf(cmd) >= 0) {
+      termPrint("no project open — create one first", "err"); return;
+    }
+    if (["python", "python3", "pip", "pip3"].indexOf(cmd) >= 0 && !user) {
+      if (!sb) { termPrint("can't verify sign-in — accounts service unavailable", "err"); return; }
+      termPrint("sign in to run code (top-right button)", "err");
+      showAccount();
+      return;
+    }
+    const files = proj ? proj.files : {};
     switch (cmd) {
       case "help":
         termPrint(
@@ -1630,6 +1672,8 @@ except Exception:
     user = u;
     const btn = $("account-btn");
     if (btn) btn.textContent = u ? (u.email || "account").split("@")[0] : "Sign in";
+    const run = $("run-btn");
+    if (run) run.title = u ? "Run (Ctrl/Cmd + Enter)" : "Sign in to run code";
     if (u && u.id !== was) onSignedIn();
   }
 
@@ -1955,7 +1999,8 @@ except Exception:
     $("market-btn").addEventListener("click", showMarket);
     $("account-btn").addEventListener("click", showAccount);
     $("clear-console-btn").addEventListener("click", clearConsole);
-    $("proj-picker").addEventListener("change", (e) => switchProject(e.target.value));
+    $("proj-picker").addEventListener("change", (e) => { if (e.target.value) switchProject(e.target.value); });
+    $("np-create").addEventListener("click", newProject);
     document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
     $("modal-scrim").addEventListener("mousedown", (e) => { if (e.target === $("modal-scrim")) closeModal(); });
     document.addEventListener("keydown", (e) => {
@@ -1972,6 +2017,7 @@ except Exception:
   async function boot() {
     await loadWorkspace();
     renderProjectPicker(); renderSidebar(); renderTabs();
+    syncChrome();
     setSaveState(persistOK ? "saved" : "blocked");
     try { initTerminal(); } catch (e) { console.error("terminal failed to load", e); }
     initDivider();
