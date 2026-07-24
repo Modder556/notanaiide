@@ -1613,8 +1613,17 @@ except Exception:
   function runnableFiles(proj) {
     const prof = profileOf(proj);
     const strategy = (prof.run && prof.run.strategy) || "none";
-    const want = strategy === "preview" ? "html" : "py";
-    return Object.keys(proj.files).filter((n) => extOf(n) === want).sort();
+    // the extensions this profile actually declares (e.g. .php, .py, .html)
+    const exts = Object.keys(prof.extensions || {}).map((e) => e.replace(/^\./, ""));
+    let want;
+    if (strategy === "preview") want = ["html"];
+    else if (exts.length) want = exts;                      // profile-driven (php, py, custom…)
+    else want = ["py"];
+    const files = Object.keys(proj.files).filter((n) => want.indexOf(extOf(n)) >= 0).sort();
+    // prefer the profile's declared entry file if present
+    const entry = prof.run && prof.run.entry;
+    if (entry && files.indexOf(entry) >= 0) { files.splice(files.indexOf(entry), 1); files.unshift(entry); }
+    return files;
   }
 
   /* Running requires an account. Note this is a product gate, not a security
@@ -1641,7 +1650,8 @@ except Exception:
 
     const cands = runnableFiles(proj);
     if (!cands.length) {
-      flashConsole("Nothing runnable here — this project has no " + (strategy === "preview" ? ".html" : ".py") + " file.", false);
+      const exts = Object.keys(prof.extensions || {}).join(", ") || ".py";
+      flashConsole("Nothing runnable here — this project has no " + exts + " file.", false);
       return;
     }
     const remembered = proj.mainFile && cands.indexOf(proj.mainFile) >= 0 ? proj.mainFile : null;
