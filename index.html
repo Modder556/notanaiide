@@ -13,7 +13,7 @@
 <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 <script src="https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.53.0/min/vs/loader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
 
 <style>
   :root {
@@ -90,6 +90,8 @@
   }
   .btn.primary:hover { filter: brightness(1.07); background: var(--accent); }
   .btn:disabled { opacity: .5; cursor: default; }
+  .btn.danger { border-color: #5c3630; color: var(--danger); }
+  .btn.danger:hover { background: #3a221e; border-color: #7a4239; }
 
   /* ---------- main split ---------- */
   #main { flex: 1; display: flex; min-height: 0; }
@@ -882,20 +884,41 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     });
   }
 
-  const MONACO_BASE = "https://cdn.jsdelivr.net/npm/monaco-editor@0.53.0/min/";
+  /* Monaco 0.53 dropped support for unbundled script-tag loading (their words:
+     the "browser-script-editor scenario" no longer works), so we pin to 0.52.2.
+     If one mirror is unreachable we try the next before degrading. */
+  const MONACO_BASES = [
+    "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/",
+    "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/",
+    "https://unpkg.com/monaco-editor@0.52.2/min/"
+  ];
+  let monacoBaseIdx = 0;
   let monacoTimer = null;
+  const monacoBase = () => MONACO_BASES[monacoBaseIdx];
 
   function initMonaco() {
     window.MonacoEnvironment = {
       getWorkerUrl: function () {
-        const code = "self.MonacoEnvironment={baseUrl:'" + MONACO_BASE + "'};importScripts('" + MONACO_BASE + "vs/base/worker/workerMain.js');";
-        return URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+        const base = monacoBase();
+        const code = "self.MonacoEnvironment={baseUrl:'" + base + "'};importScripts('" + base + "vs/base/worker/workerMain.js');";
+        try { return URL.createObjectURL(new Blob([code], { type: "text/javascript" })); }
+        catch (e) { return base + "vs/base/worker/workerMain.js"; }
       }
     };
     if (typeof require === "undefined" || !require.config) { useFallbackEditor("the editor script didn't load"); return; }
-    // never hang on "Loading editor…" again — fall back to a plain editor
-    monacoTimer = setTimeout(() => { if (!monacoReady) useFallbackEditor("the editor timed out"); }, 15000);
-    require.config({ paths: { vs: MONACO_BASE + "vs" } });
+    tryMonacoBase();
+  }
+
+  function tryMonacoBase() {
+    if (monacoBaseIdx >= MONACO_BASES.length) { useFallbackEditor("the editor couldn't be reached"); return; }
+    clearTimeout(monacoTimer);
+    monacoTimer = setTimeout(() => {
+      if (monacoReady) return;
+      monacoBaseIdx++;                       // that mirror stalled — try the next
+      if (monacoBaseIdx < MONACO_BASES.length) tryMonacoBase();
+      else useFallbackEditor("the editor timed out");
+    }, 12000);
+    require.config({ paths: { vs: monacoBase() + "vs" } });
     require(["vs/editor/editor.main"], function () {
       monaco.editor.defineTheme("tinker-dark", {
         base: "vs-dark", inherit: true,
@@ -942,8 +965,10 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
       const f = curFile();
       if (f) openFile(f); else showEditorEmpty();
     }, function (err) {
-      console.error("monaco failed", err);
-      useFallbackEditor("the editor failed to load");
+      console.error("monaco failed from " + monacoBase(), err);
+      monacoBaseIdx++;
+      if (monacoBaseIdx < MONACO_BASES.length) tryMonacoBase();
+      else useFallbackEditor("the editor failed to load");
     });
   }
 
@@ -976,8 +1001,10 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     $("fb-retry").addEventListener("click", (e) => {
       e.preventDefault();
       editorMode = "loading";
+      monacoBaseIdx = 0;
       $("editor").innerHTML = "Loading editor…";
       $("editor").classList.add("empty");
+      $("editor").style.display = "";
       initMonaco();
     });
     const f = curFile();
@@ -1191,7 +1218,12 @@ files:
       '<select id="st-main" style="width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:7px;padding:9px 10px;color:var(--text);font-family:var(--mono);font-size:13px">' +
         fileOpts +
       '</select>' +
-      '<p style="margin:14px 0 0;font-size:11.5px;color:var(--faint)">Turtle is built in: if any file imports turtle, Run draws to the Canvas panel automatically.</p>',
+      '<p style="margin:14px 0 0;font-size:11.5px;color:var(--faint)">Turtle is built in: if any file imports turtle, Run draws to the Canvas panel automatically.</p>' +
+      '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
+        '<label style="margin-top:0">Danger zone</label>' +
+        '<button class="btn danger" id="st-delete">Delete "' + escapeHtml(ws.active) + '"</button>' +
+        '<span style="font-size:11.5px;color:var(--faint);margin-left:10px">Removes the project and all its files.</span>' +
+      '</div>',
       () => {
         settings.alwaysAsk = (mode === "ask");
         activeProject().mainFile = $("st-main").value || null;
@@ -1205,6 +1237,9 @@ files:
           c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
           el.classList.add("sel"); mode = el.dataset.m;
         }));
+        $("st-delete").addEventListener("click", () => {
+          if (deleteProject(ws.active)) closeModal();
+        });
       }
     );
   }
@@ -1271,6 +1306,29 @@ files:
       }
     );
   }
+  function deleteProject(name) {
+    if (!(name in ws.projects)) return;
+    const count = Object.keys(ws.projects[name].files).length;
+    if (!confirm('Delete project "' + name + '" and its ' + count + ' file(s)?\n\nThis can\'t be undone.')) return false;
+    disposeModelsForProject(name);
+    delete ws.projects[name];
+    delete session.open[name];
+    delete session.current[name];
+    const rest = Object.keys(ws.projects);
+    ws.active = rest.length ? rest[0] : null;
+    if (ws.active && !session.open[ws.active]) {
+      const first = Object.keys(ws.projects[ws.active].files)[0];
+      session.open[ws.active] = first ? [first] : [];
+      session.current[ws.active] = first || null;
+    }
+    renderProjectPicker(); renderSidebar(); renderTabs();
+    const f = curFile();
+    if (f) openFile(f); else showEditorEmpty();
+    syncChrome();
+    scheduleSave();
+    return true;
+  }
+
   function switchProject(name) {
     if (!(name in ws.projects)) return;
     ws.active = name;
