@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Tinker — browser IDE</title>
 
 <!-- IMPORTANT: load xterm + pyodide BEFORE Monaco's AMD loader, otherwise their
@@ -39,12 +39,17 @@
 
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
+  /* 100dvh tracks mobile browser chrome as it hides/shows; 100% is the fallback. */
+  @supports (height: 100dvh) { html, body { height: 100dvh; } }
   body {
     background: var(--bg); color: var(--text);
     font-family: var(--sans); font-size: 14px;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
+    overscroll-behavior: none;
   }
+  .only-mobile { display: none !important; }
   button { font-family: inherit; color: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -103,7 +108,8 @@
   .btn.danger:hover { background: #3a221e; border-color: #7a4239; }
 
   /* ---------- main split ---------- */
-  #main { flex: 1; display: flex; min-height: 0; }
+  #main { flex: 1; display: flex; min-height: 0; position: relative; }
+  #side-scrim { display: none; }
 
   /* sidebar */
   #sidebar {
@@ -374,6 +380,68 @@
     .land-nav-right .land-link { display: none; }
   }
 
+  /* Panel tabs must never squash or spill; they scroll if there are too many. */
+  #panel-tabs { overflow-x: auto; scrollbar-width: none; }
+  #panel-tabs::-webkit-scrollbar { display: none; }
+  .ptab, .ptab-btn { flex: 0 0 auto; }
+
+  /* ---------- toolbar collapses early ----------
+     Nine controls don't fit much below a laptop, so the secondary ones move
+     into the menu well before phone widths (this covers iPad portrait). */
+  @media (max-width: 1024px) {
+    .hide-mobile { display: none !important; }
+    .only-mobile { display: inline-flex !important; }
+    #sidebar { flex: 0 0 172px; }
+    #topbar { gap: 10px; padding: 0 10px; }
+  }
+  /* The Files toggle only means anything once the sidebar is a drawer. */
+  @media (min-width: 761px) { #files-btn { display: none !important; } }
+
+  /* ---------- phones ---------- */
+  @media (max-width: 760px) {
+    #topbar { gap: 7px; padding: 0 8px; height: 46px; }
+    .wordmark { font-size: 13px; }
+    .btn { padding: 8px 11px; }              /* bigger tap targets */
+    .icon-btn { padding: 6px 8px; }
+    .proj-select { padding: 4px 6px 4px 9px; min-width: 0; }
+    .proj-select label { display: none; }
+    .proj-select select { max-width: 27vw; }
+
+    /* sidebar becomes a slide-over drawer */
+    #sidebar {
+      position: absolute; top: 0; left: 0; bottom: 0; z-index: 25;
+      flex: 0 0 auto; width: 76vw; max-width: 270px;
+      transform: translateX(-102%); transition: transform .18s ease;
+      box-shadow: 0 0 40px rgba(0,0,0,.55);
+    }
+    #sidebar.open { transform: none; }
+    #side-scrim { position: absolute; inset: 0; z-index: 20; background: rgba(8,10,13,.55); }
+    #side-scrim.show { display: block; }
+
+    #panel { flex: 0 0 46%; }
+    #divider { height: 14px; }                /* easier to grab with a thumb */
+    .ptab { padding: 0 10px; font-size: 12px; }
+    .file-row { padding: 9px 8px; }
+    .file-row .del { opacity: 1; }            /* no hover on touch */
+    .tab { padding: 0 11px; }
+
+    .modal { width: 100%; padding: 18px; max-height: 86vh; overflow-y: auto; }
+    /* iOS zooms the whole page when focusing an input under 16px */
+    .modal input[type=text], .modal input[type=password],
+    .modal select, .modal textarea { font-size: 16px; }
+    .chips { flex-wrap: wrap; }
+  }
+
+  @media (max-width: 420px) {
+    .wordmark { font-size: 12px; }
+    #topbar { gap: 6px; padding: 0 6px; }
+    .btn { padding: 8px 9px; }
+    .proj-select { padding: 4px 4px 4px 7px; }
+    .proj-select select { max-width: 19vw; }
+    #panel { flex: 0 0 50%; }
+    .ptab { padding: 0 8px; }
+  }
+
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-thumb { background: #2b323b; border-radius: 6px; border: 2px solid var(--bg); }
   ::-webkit-scrollbar-thumb:hover { background: #3a424d; }
@@ -420,24 +488,27 @@
 
 <div id="app">
   <div id="topbar">
+    <button class="btn only-mobile" id="files-btn" title="Files" aria-label="Files">\u2630</button>
     <div class="wordmark">tinker<span class="cursor"></span></div>
     <div class="proj-select">
       <label>project</label>
       <select id="proj-picker" title="Switch project"></select>
       <button class="icon-btn" id="del-proj-btn" title="Delete this project">×</button>
     </div>
-    <button class="btn" id="new-proj-btn">+ New project</button>
-    <button class="btn" id="profiles-btn" title="Language profiles">Profiles</button>
-    <button class="btn" id="market-btn" title="Profile marketplace">Marketplace</button>
-    <button class="btn" id="runtimes-btn" title="Language runtimes">Runtimes</button>
-    <button class="btn" id="cloud-btn" title="Run real languages on GitHub Actions">Cloud</button>
-    <button class="btn" id="settings-btn" title="Settings">Settings</button>
+    <button class="btn hide-mobile" id="new-proj-btn">+ New project</button>
+    <button class="btn hide-mobile" id="profiles-btn" title="Language profiles">Profiles</button>
+    <button class="btn hide-mobile" id="market-btn" title="Profile marketplace">Marketplace</button>
+    <button class="btn hide-mobile" id="runtimes-btn" title="Language runtimes">Runtimes</button>
+    <button class="btn hide-mobile" id="cloud-btn" title="Run real languages on GitHub Actions">Cloud</button>
+    <button class="btn hide-mobile" id="settings-btn" title="Settings">Settings</button>
+    <button class="btn only-mobile" id="menu-btn" title="Menu" aria-label="Menu">\u22EF</button>
     <div class="topbar-spacer"></div>
     <button class="btn" id="account-btn" title="Account">Sign in</button>
     <button class="btn primary" id="run-btn" title="Run (Ctrl/Cmd + Enter)">▶ Run</button>
   </div>
 
   <div id="main">
+    <div id="side-scrim"></div>
     <div id="sidebar">
       <div class="side-head">
         <span>Files</span>
@@ -480,7 +551,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 13</span>
+    <span id="build-tag">build 14</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -1256,6 +1327,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
       fbArea.focus();
     }
     renderSidebar(); renderTabs();
+    closeDrawerIfNarrow();
   }
   function closeTab(name) {
     const ol = openList();
@@ -2914,20 +2986,60 @@ except Exception:
   }
   function closeModal() { $("modal-scrim").classList.remove("show"); modalSubmit = null; }
 
+  /* ======================= mobile chrome ======================= */
+  function isNarrow() { return window.matchMedia("(max-width: 760px)").matches; }
+  function setDrawer(open) {
+    const sb = $("sidebar"), sc = $("side-scrim");
+    if (!sb || !sc) return;
+    sb.classList.toggle("open", !!open);
+    sc.classList.toggle("show", !!open);
+  }
+  function toggleDrawer() { setDrawer(!$("sidebar").classList.contains("open")); }
+  function closeDrawerIfNarrow() { if (isNarrow()) setDrawer(false); }
+
+  // On phones the secondary toolbar buttons collapse into one menu.
+  function showMobileMenu() {
+    const items = [
+      ["New project", newProject], ["Profiles", showProfiles], ["Marketplace", showMarket],
+      ["Runtimes", showRuntimes], ["Cloud", showCloud], ["Settings", showSettings]
+    ];
+    openModal("Menu", "",
+      items.map((it, i) => '<button class="btn" data-mi="' + i + '" style="width:100%;justify-content:center;margin-bottom:7px">' + escapeHtml(it[0]) + '</button>').join(""),
+      () => true,
+      () => {
+        const ok = $("modal-ok"); if (ok) ok.style.display = "none";
+        $("modal-cancel").textContent = "Close";
+        $("modal-box").querySelectorAll("[data-mi]").forEach((b) => b.addEventListener("click", () => {
+          const fn = items[Number(b.dataset.mi)][1];
+          closeModal();
+          setTimeout(fn, 0);
+        }));
+      });
+  }
+
   /* ======================= divider (resize panel) ======================= */
   function initDivider() {
     const div = $("divider"), panel = $("panel");
     let dragging = false;
-    div.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); document.body.style.userSelect = "none"; });
-    window.addEventListener("mousemove", (e) => {
-      if (!dragging) return;
+    const moveTo = (clientY) => {
       const main = $("main").getBoundingClientRect();
-      let h = main.bottom - e.clientY;
+      let h = main.bottom - clientY;
       h = Math.max(90, Math.min(main.height - 120, h));
       panel.style.flexBasis = h + "px";
       try { fit.fit(); } catch (err) {}
-    });
+    };
+    div.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); document.body.style.userSelect = "none"; });
+    window.addEventListener("mousemove", (e) => { if (dragging) moveTo(e.clientY); });
     window.addEventListener("mouseup", () => { if (dragging) { dragging = false; document.body.style.userSelect = ""; } });
+    // touch: same drag, and preventDefault so the page doesn't scroll under the finger
+    div.addEventListener("touchstart", () => { dragging = true; }, { passive: true });
+    window.addEventListener("touchmove", (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      moveTo(e.touches[0].clientY);
+    }, { passive: false });
+    window.addEventListener("touchend", () => { dragging = false; });
+    window.addEventListener("touchcancel", () => { dragging = false; });
   }
 
   /* ======================= wiring + init ======================= */
@@ -2944,6 +3056,9 @@ except Exception:
     $("clear-console-btn").addEventListener("click", clearConsole);
     $("proj-picker").addEventListener("change", (e) => { if (e.target.value) switchProject(e.target.value); });
     $("np-create").addEventListener("click", newProject);
+    $("files-btn").addEventListener("click", toggleDrawer);
+    $("menu-btn").addEventListener("click", showMobileMenu);
+    $("side-scrim").addEventListener("click", () => setDrawer(false));
     $("del-proj-btn").addEventListener("click", () => { if (ws.active) deleteProject(ws.active); });
     document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
     $("modal-scrim").addEventListener("mousedown", (e) => { if (e.target === $("modal-scrim")) closeModal(); });
@@ -2953,6 +3068,7 @@ except Exception:
     });
     window.addEventListener("beforeunload", () => { if (persistOK) doSave(); });
     window.addEventListener("resize", () => {
+      if (!isNarrow()) setDrawer(false);
       try { fit.fit(); } catch (e) {}
       if (lastTurtlePayload) renderTurtle(lastTurtlePayload);
     });
