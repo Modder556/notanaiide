@@ -213,6 +213,16 @@
   #preview-frame { width: 100%; height: 100%; border: 0; background: #fff; }
   #canvas-host { width: 100%; height: 100%; display: grid; place-items: center; background: #101317; overflow: auto; }
   #turtle-canvas { background: #fff; border-radius: 4px; box-shadow: 0 2px 14px rgba(0,0,0,.35); }
+  #media-host {
+    width: 100%; height: 100%; display: grid; place-content: center; justify-items: center;
+    gap: 8px; padding: 10px; background: #101317; overflow: auto;
+  }
+  #media-host video, #media-host img {
+    max-width: 100%; max-height: calc(100% - 28px); border-radius: 6px; background: #000;
+    box-shadow: 0 2px 18px rgba(0,0,0,.45);
+  }
+  .media-note { font-family: var(--mono); font-size: 11.5px; color: var(--faint); text-align: center; }
+  .media-note a { color: var(--cyan); }
 
   /* profiles list */
   .modal.wide { width: 520px; }
@@ -453,6 +463,7 @@
           <div class="ptab" data-pane="terminal">Terminal</div>
           <div class="ptab" data-pane="preview">Preview</div>
           <div class="ptab" data-pane="canvas">Canvas</div>
+          <div class="ptab" data-pane="media">Media</div>
           <div class="ptab-spacer"></div>
           <button class="icon-btn ptab-btn" id="clear-console-btn" title="Clear console">⌫</button>
         </div>
@@ -461,6 +472,7 @@
           <div class="pane" data-pane="terminal"><div id="term-host"></div></div>
           <div class="pane" data-pane="preview"><iframe id="preview-frame" sandbox="allow-scripts allow-modals"></iframe></div>
           <div class="pane" data-pane="canvas"><div id="canvas-host"><canvas id="turtle-canvas"></canvas></div></div>
+          <div class="pane" data-pane="media"><div id="media-host"><div class="media-note">Cloud projects that render a video or image show it here.</div></div></div>
         </div>
       </div>
     </div>
@@ -468,7 +480,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 11</span>
+    <span id="build-tag">build 13</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -2384,6 +2396,11 @@ except Exception:
       if (r.status === 204) return;
       if (r.status === 404 && a < 6) { await wait(2500); continue; }
       if (r.status === 404) throw new Error("the runner repo has no run.yml workflow — recreate it from the template");
+      // 422 = the workflow's declared inputs don't match what we sent, which in
+      // practice always means the runner's run.yml is an older version.
+      if (r.status === 422) throw new Error(
+        "your runner repo's workflow is out of date. Update .github/workflows/run.yml in " +
+        owner + "/" + GH_APP.repo + " to the current version, then try again.");
       throw new Error("couldn't start the run (" + r.status + ")");
     }
   }
@@ -2476,24 +2493,61 @@ except Exception:
   }
 
   /* ---- artifacts: profiles that produce a file (video, image) rather than text ---- */
-  function showArtifact(owner, token, artifact) {
-    const url = "https://raw.githubusercontent.com/" + owner + "/" + GH_APP.repo +
-                "/main/runs/" + token + "/" + artifact;
+  let mediaObjUrl = null;
+  const MEDIA_MIME = {
+    mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+    gif: "image/gif", svg: "image/svg+xml", webp: "image/webp"
+  };
+  async function showArtifact(owner, token, artifact) {
+    const rawUrl = "https://raw.githubusercontent.com/" + owner + "/" + GH_APP.repo +
+                   "/main/runs/" + token + "/" + artifact;
     const ext = (artifact.split(".").pop() || "").toLowerCase();
-    const isVid = ["mp4", "webm", "mov"].indexOf(ext) >= 0;
-    const isImg = ["png", "jpg", "jpeg", "gif", "svg", "webp"].indexOf(ext) >= 0;
-    if (!isVid && !isImg) {
-      appendConsole("\nProduced " + artifact + " — " + url + "\n", false);
+    const mime = MEDIA_MIME[ext];
+    const host = $("media-host");
+    if (!mime || !host) {
+      appendConsole("\nProduced " + artifact + " \u2014 " + rawUrl + "\n", false);
       return;
     }
-    const media = isVid
-      ? '<video src="' + url + '" controls autoplay loop style="max-width:100%;max-height:100%"></video>'
-      : '<img src="' + url + '" style="max-width:100%;max-height:100%" />';
-    $("preview-frame").srcdoc =
-      '<body style="margin:0;background:#101317;display:grid;place-items:center;height:100vh">' + media +
-      '<\/body>';
-    showPane("preview");
-    appendConsole("\nRendered " + artifact + " — shown in the Preview panel.\n", false);
+    showPane("media");
+    host.innerHTML = '<div class="media-note">loading ' + escapeHtml(artifact) + '\u2026</div>';
+    appendConsole("\nRendered " + artifact + " \u2014 see the Media panel.\n", false);
+
+    // GitHub serves raw files as application/octet-stream, which <video> refuses
+    // to play. Fetch the bytes and re-wrap them with the correct MIME type.
+    let src = rawUrl, viaBlob = false;
+    if (mediaObjUrl) { try { URL.revokeObjectURL(mediaObjUrl); } catch (e) {} mediaObjUrl = null; }
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const r = await fetch(rawUrl + "?t=" + Date.now(), { cache: "no-store" });
+        if (r.ok) {
+          const buf = await r.arrayBuffer();
+          if (buf.byteLength > 0) {
+            mediaObjUrl = URL.createObjectURL(new Blob([buf], { type: mime }));
+            src = mediaObjUrl; viaBlob = true;
+            break;
+          }
+        }
+      } catch (e) { /* commit may not be visible on raw yet */ }
+      await wait(2000);
+    }
+
+    const isVid = mime.indexOf("video/") === 0;
+    host.innerHTML =
+      (isVid
+        ? '<video src="' + escapeHtml(src) + '" controls autoplay loop playsinline></video>'
+        : '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(artifact) + '" />') +
+      '<div class="media-note">' + escapeHtml(artifact) +
+        ' \u00b7 <a href="' + escapeHtml(rawUrl) + '" target="_blank" rel="noopener">open original</a></div>';
+
+    const el = host.querySelector("video, img");
+    if (el) el.addEventListener("error", () => {
+      host.innerHTML = '<div class="media-note">Couldn\'t play ' + escapeHtml(artifact) +
+        ' in the browser.<br /><a href="' + escapeHtml(rawUrl) + '" target="_blank" rel="noopener">open it directly</a></div>';
+    });
+    if (!viaBlob) {
+      appendConsole("(couldn't fetch the file directly \u2014 falling back to a link)\n", false);
+    }
   }
 
   /* ---- consent for community cloud profiles ---- */
@@ -2508,7 +2562,7 @@ except Exception:
       "This profile came from outside Tinker. These are the exact commands it will run on your own GitHub Actions machine.",
       (setup ? '<label>Setup</label><pre style="margin:0;background:var(--bg-3);border:1px solid var(--border);border-radius:7px;padding:9px 10px;font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word">' + escapeHtml(setup) + '</pre>' : "") +
       '<label>Run</label><pre style="margin:0;background:var(--bg-3);border:1px solid var(--border);border-radius:7px;padding:9px 10px;font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word">' + escapeHtml(cmd) + '</pre>' +
-      '<p style="font-size:11.5px;color:var(--faint);margin:12px 0 0">This runs on a throwaway VM on your own Actions quota, and can\'t reach your browser or your other repositories. It can still waste your free minutes, so only approve profiles you trust.</p>',
+      '<p style="font-size:11.5px;color:var(--faint);margin:12px 0 0">This runs on a throwaway VM on your own Actions quota, and can\'t reach your browser or your other repositories. On a public runner repo Actions minutes are free and unlimited, so the real cost of a bad profile is wasted time and GitHub\'s fair-use limits \u2014 only approve profiles you trust.</p>',
       () => {
         if (!ws.cloudOK) ws.cloudOK = {};
         ws.cloudOK[prof.id] = true;
