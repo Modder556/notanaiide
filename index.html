@@ -1,4 +1,4 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -420,6 +420,7 @@
     <button class="btn" id="profiles-btn" title="Language profiles">Profiles</button>
     <button class="btn" id="market-btn" title="Profile marketplace">Marketplace</button>
     <button class="btn" id="runtimes-btn" title="Language runtimes">Runtimes</button>
+    <button class="btn" id="cloud-btn" title="Run real languages on GitHub Actions">Cloud</button>
     <button class="btn" id="settings-btn" title="Settings">Settings</button>
     <div class="topbar-spacer"></div>
     <button class="btn" id="account-btn" title="Account">Sign in</button>
@@ -467,7 +468,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 7</span>
+    <span id="build-tag">build 9</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -594,6 +595,12 @@ __BLANK_TEMPLATE__
 `
   ];
 
+  T.brainfuck =
+`Brainfuck hello world  press Ctrl or Cmd and Enter to run
+only eight symbols do anything here  any other character is ignored
+++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.
+`;
+
   // YAML block scalars need every line indented; keep templates readable above.
   function indentBlock(s, pad) {
     return s.replace(/\n$/, "").split("\n").map((l) => pad + l).join("\n");
@@ -633,6 +640,7 @@ __BLANK_TEMPLATE__
       try { registerProfile(parseProfile(hydrate(src)), false); }
       catch (e) { console.error("built-in profile failed to parse", e); }
     });
+    try { loadCloudProfiles(); } catch (e) { console.error("cloud profiles failed", e); }
   }
   function profileOf(proj) {
     const p = proj && proj.profile ? profiles[proj.profile] : null;
@@ -938,7 +946,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   async function doSave() {
     if (!persistOK) { setSaveState("blocked"); return; }
     try {
-      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings, runtimes: ws.runtimes || {} }));
+      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings, runtimes: ws.runtimes || {}, ghCfg: ws.ghCfg || {} }));
       setSaveState("saved");
       scheduleCloudPush();
     } catch (e) {
@@ -970,6 +978,8 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
         }
         if (parsed && parsed.settings) settings = Object.assign(settings, parsed.settings);
         var savedRuntimes = (parsed && parsed.runtimes && typeof parsed.runtimes === "object") ? parsed.runtimes : null;
+        var savedGhCfg = (parsed && parsed.ghCfg && typeof parsed.ghCfg === "object") ? parsed.ghCfg : null;
+        if (savedGhCfg) window.__pendingGhCfg = savedGhCfg;
         if (parsed && parsed.projects && Object.keys(parsed.projects).length) {
           ws = { projects: parsed.projects, active: parsed.active in parsed.projects ? parsed.active : Object.keys(parsed.projects)[0] };
           if (savedRuntimes) ws.runtimes = savedRuntimes;
@@ -991,6 +1001,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     }
     if (!ws) ws = { projects: {}, active: null };
     if (!ws.runtimes) ws.runtimes = window.__pendingRuntimes || {};
+    if (!ws.ghCfg) ws.ghCfg = window.__pendingGhCfg || {};
     if (ws.active && ws.projects[ws.active]) {
       const first = Object.keys(activeProject().files)[0];
       session.open[ws.active] = first ? [first] : [];
@@ -1687,12 +1698,15 @@ except Exception:
     );
   }
 
-  const BUILTIN_STRATEGIES = ["pyodide", "preview", "turtle", "none"];
+  const BUILTIN_STRATEGIES = ["pyodide", "preview", "turtle", "brainfuck", "cloud", "none"];
   function execute(file) {
     const proj = activeProject();
     const prof = profileOf(proj);
     const strategy = (prof.run && prof.run.strategy) || "none";
     if (strategy === "preview") { showPane("preview"); buildPreview(file); return; }
+    if (strategy === "brainfuck") { showPane("console"); clearConsole(); runBrainfuck(file, "console"); return; }
+    // Anything the browser can't run goes to a real Linux VM via GitHub Actions.
+    if (strategy === "cloud") { runCloud(file); return; }
     if (strategy === "pyodide" || strategy === "turtle") {
       const turtle = usesTurtle(proj) || strategy === "turtle";
       if (turtle) { showPane("canvas"); runPythonFile(file, "console", true); }
@@ -1926,6 +1940,7 @@ except Exception:
           ws.projects = cloud.projects;
           ws.active = cloud.active in cloud.projects ? cloud.active : Object.keys(cloud.projects)[0];
           if (cloud.runtimes && typeof cloud.runtimes === "object") ws.runtimes = cloud.runtimes;
+          if (cloud.ghCfg && typeof cloud.ghCfg === "object") ws.ghCfg = cloud.ghCfg;
           if (cloud.customProfiles) {
             Object.keys(cloud.customProfiles).forEach((id) => {
               try { registerProfile(parseProfile(cloud.customProfiles[id]), true, cloud.customProfiles[id]); } catch (e) {}
@@ -1960,7 +1975,7 @@ except Exception:
   async function pushCloud() {
     if (!sb || !user) return;
     try {
-      const payload = { projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, runtimes: ws.runtimes || {} };
+      const payload = { projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, runtimes: ws.runtimes || {}, ghCfg: ws.ghCfg || {} };
       const { error } = await sb.from("workspaces")
         .upsert({ user_id: user.id, data: payload, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
       if (error) throw error;
@@ -2154,6 +2169,345 @@ except Exception:
       } catch (e) { host.innerHTML = '<p style="color:var(--danger);font-size:12px">' + escapeHtml((e && e.message) || e) + '</p>'; }
     }
     loadMine();
+  }
+
+  /* ======================= brainfuck (built-in, no runtime) =======================
+     Tiny esolang: an 8-command interpreter over a byte tape. Pure JS, runs
+     instantly, needs no WASM — so it's a first-class strategy like pyodide.   */
+  function runBrainfuckSrc(src, input) {
+    const tapeSize = 30000, maxSteps = 50000000;
+    const tape = new Uint8Array(tapeSize);
+    let ptr = 0, ip = 0, inPtr = 0, steps = 0;
+    const out = [];
+    input = input || "";
+    const code = src.replace(/[^><+\-.,\[\]]/g, "");   // strip everything that isn't a command
+    const jump = new Int32Array(code.length);
+    const stack = [];
+    for (let i = 0; i < code.length; i++) {
+      if (code[i] === "[") stack.push(i);
+      else if (code[i] === "]") {
+        if (!stack.length) throw new Error("Unmatched ']'");
+        const j = stack.pop(); jump[i] = j; jump[j] = i;
+      }
+    }
+    if (stack.length) throw new Error("Unmatched '['");
+    while (ip < code.length) {
+      if (++steps > maxSteps) throw new Error("Stopped after " + maxSteps + " steps (infinite loop?)");
+      switch (code[ip]) {
+        case ">": ptr = (ptr + 1) % tapeSize; break;
+        case "<": ptr = (ptr - 1 + tapeSize) % tapeSize; break;
+        case "+": tape[ptr] = (tape[ptr] + 1) & 255; break;
+        case "-": tape[ptr] = (tape[ptr] - 1 + 256) & 255; break;
+        case ".": out.push(String.fromCharCode(tape[ptr])); break;
+        case ",": tape[ptr] = inPtr < input.length ? (input.charCodeAt(inPtr++) & 255) : 0; break;
+        case "[": if (tape[ptr] === 0) ip = jump[ip]; break;
+        case "]": if (tape[ptr] !== 0) ip = jump[ip]; break;
+      }
+      ip++;
+    }
+    return out.join("");
+  }
+  function runBrainfuck(path, target) {
+    outTarget = target;
+    const proj = activeProject();
+    if (!proj || !(path in proj.files)) { writeErr("No such file: " + path + "\n"); return; }
+    const src = proj.files[path] || "";
+    let input = "";
+    if (src.indexOf(",") >= 0) { input = window.prompt("Program input (stdin):") || ""; }
+    try {
+      const out = runBrainfuckSrc(src, input);
+      writeOut(out);
+      if (!out.endsWith("\n")) writeOut("\n");
+    } catch (e) {
+      writeErr("Brainfuck error: " + ((e && e.message) || e) + "\n");
+    }
+  }
+
+  /* ======================= cloud run (GitHub Actions) =======================
+     Languages a browser can't run (C, Rust, Go, Java…) are compiled and run on
+     a real Ubuntu VM via GitHub Actions, on the user's own free quota.
+
+     Multi-user safety: one runner repo can be shared by a whole class. Every
+     run gets a unique token; its source lives in runs/<token>/ and its output
+     at runs/<token>/output.txt, and the workflow stamps the run name with the
+     token so each client waits for *its own* run rather than "the latest one".
+     Nothing is shared between concurrent runs, so nobody clobbers anybody.   */
+
+  // ---- config: fill these two in and every user gets cloud run for free ----
+  const GH_APP = {
+    clientId: "",                       // <-- PASTE your GitHub App Client ID (Iv23…)
+    workerUrl: "",                      // <-- PASTE your Worker URL ending in /exchange
+    slug: "tinkeraction",
+    templateOwner: "Modder556",
+    repo: "tinker-runner"
+  };
+  const CLOUD_START = "---TINKER-OUTPUT-START---", CLOUD_END = "---TINKER-OUTPUT-END---";
+  let ghToken = null, ghUser = null;
+
+  const CLOUD_LANGS = {
+    c:    { label:"C",    ext:".c",    mono:"c",    entry:"main.c",    icon:"\u25C7", color:"#7f9fc4",
+            hello:'#include <stdio.h>\n\nint main(void) {\n    printf("Hello from C\\n");\n    for (int i = 1; i <= 5; i++)\n        printf("%d squared is %d\\n", i, i * i);\n    return 0;\n}\n' },
+    cpp:  { label:"C++",  ext:".cpp",  mono:"cpp",  entry:"main.cpp",  icon:"\u25C8", color:"#8f9fd4",
+            hello:'#include <iostream>\n\nint main() {\n    std::cout << "Hello from C++\\n";\n    for (int i = 1; i <= 5; i++)\n        std::cout << i << " squared is " << i * i << "\\n";\n}\n' },
+    rust: { label:"Rust", ext:".rs",   mono:"rust", entry:"main.rs",   icon:"\u2699", color:"#d08a5a",
+            hello:'fn main() {\n    println!("Hello from Rust");\n    for i in 1..=5 {\n        println!("{} squared is {}", i, i * i);\n    }\n}\n' },
+    go:   { label:"Go",   ext:".go",   mono:"go",   entry:"main.go",   icon:"\u25C6", color:"#6fb3c9",
+            hello:'package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello from Go")\n    for i := 1; i <= 5; i++ {\n        fmt.Printf("%d squared is %d\\n", i, i*i)\n    }\n}\n' },
+    java: { label:"Java", ext:".java", mono:"java", entry:"Main.java", icon:"\u2615", color:"#c98f6f",
+            hello:'public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello from Java");\n        for (int i = 1; i <= 5; i++)\n            System.out.println(i + " squared is " + (i * i));\n    }\n}\n' }
+  };
+
+  function loadCloudProfiles() {
+    Object.keys(CLOUD_LANGS).forEach((id) => {
+      const L = CLOUD_LANGS[id];
+      const exts = {}; exts[L.ext] = L.mono;
+      const files = {}; files[L.entry] = L.hello;
+      registerProfile({
+        id: id, name: L.label, icon: L.icon, color: L.color,
+        extensions: exts,
+        run: { strategy: "cloud", cloud: id, entry: L.entry },
+        files: files
+      }, false);
+    });
+  }
+
+  /* ---- config helpers (constants above, overridable in the Cloud panel) ---- */
+  function ghCfg() {
+    const saved = (ws && ws.ghCfg) ? ws.ghCfg : {};
+    return {
+      clientId: saved.clientId || GH_APP.clientId,
+      workerUrl: saved.workerUrl || GH_APP.workerUrl,
+      slug: saved.slug || GH_APP.slug,
+      owner: saved.owner || (ghUser && ghUser.login) || "",
+      templateOwner: GH_APP.templateOwner,
+      repo: GH_APP.repo
+    };
+  }
+  function ghConfigured() { const c = ghCfg(); return !!(c.clientId && c.workerUrl); }
+  function ghConnected() { return !!(ghToken && ghUser); }
+
+  function gh(method, path, body) {
+    const o = { method: method, headers: {
+      "Authorization": "Bearer " + ghToken,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28"
+    } };
+    if (body) { o.body = JSON.stringify(body); o.headers["Content-Type"] = "application/json"; }
+    return fetch("https://api.github.com" + path, o);
+  }
+  function b64enc(s) { return btoa(unescape(encodeURIComponent(s))); }
+  function b64dec(s) { return decodeURIComponent(escape(atob(String(s).replace(/\s/g, "")))); }
+  function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  function newRunToken() {
+    const a = new Uint8Array(5); crypto.getRandomValues(a);
+    return Array.from(a).map((b) => b.toString(16).padStart(2, "0")).join("") + Date.now().toString(36);
+  }
+
+  /* ---- connect ---- */
+  function ghStartAuth() {
+    const c = ghCfg();
+    if (!c.clientId) { flashConsole("Cloud run isn't configured yet — open Cloud to set it up.", true); return; }
+    const st = newRunToken();
+    try { sessionStorage.setItem("gh_state", st); sessionStorage.setItem("gh_pending", "1"); } catch (e) {}
+    location.href = "https://github.com/login/oauth/authorize"
+      + "?client_id=" + encodeURIComponent(c.clientId)
+      + "&redirect_uri=" + encodeURIComponent(location.origin + location.pathname)
+      + "&state=" + encodeURIComponent(st);
+  }
+  async function ghHandleCallback() {
+    let pending = null, saved = null;
+    try { pending = sessionStorage.getItem("gh_pending"); saved = sessionStorage.getItem("gh_state"); } catch (e) {}
+    if (!pending) return;                      // not our redirect (Supabase also uses ?code=)
+    const p = new URLSearchParams(location.search);
+    const code = p.get("code");
+    if (!code) return;
+    try { sessionStorage.removeItem("gh_pending"); } catch (e) {}
+    const stateOk = saved && saved === p.get("state");
+    history.replaceState({}, document.title, location.origin + location.pathname);
+    if (!stateOk) { flashConsole("GitHub sign-in aborted (state mismatch).", true); return; }
+    const c = ghCfg();
+    try {
+      const r = await fetch(c.workerUrl, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code, redirect_uri: location.origin + location.pathname }) });
+      const j = await r.json();
+      if (!r.ok || j.error) throw new Error(j.error + " " + (j.detail || ""));
+      ghToken = j.access_token;
+      try { localStorage.setItem("gh_token", ghToken); } catch (e) {}
+      await ghLoadUser();
+      flashConsole("GitHub connected as " + (ghUser ? ghUser.login : "?") + ".", false);
+    } catch (e) {
+      flashConsole("GitHub connect failed: " + ((e && e.message) || e), true);
+    }
+  }
+  async function ghLoadUser() {
+    if (!ghToken) return null;
+    const r = await gh("GET", "/user");
+    if (!r.ok) { ghToken = null; ghUser = null; try { localStorage.removeItem("gh_token"); } catch (e) {} return null; }
+    ghUser = await r.json();
+    return ghUser;
+  }
+  async function ghRestore() {
+    let t = null; try { t = localStorage.getItem("gh_token"); } catch (e) {}
+    if (!t) return;
+    ghToken = t;
+    await ghLoadUser();
+  }
+  function ghDisconnect() {
+    ghToken = null; ghUser = null;
+    try { localStorage.removeItem("gh_token"); } catch (e) {}
+  }
+
+  /* ---- the pipeline (per-run isolated) ---- */
+  async function cloudPut(owner, path, content, message) {
+    let sha = null;
+    const g = await gh("GET", "/repos/" + owner + "/" + GH_APP.repo + "/contents/" + path + "?t=" + Date.now());
+    if (g.ok) { try { sha = (await g.json()).sha; } catch (e) {} }
+    const body = { message: message, content: b64enc(content), branch: "main" };
+    if (sha) body.sha = sha;
+    const r = await gh("PUT", "/repos/" + owner + "/" + GH_APP.repo + "/contents/" + path, body);
+    if (!r.ok) throw new Error("couldn't upload your code (" + r.status + ")");
+  }
+  async function cloudDispatch(owner, language, entry, token) {
+    const path = "/repos/" + owner + "/" + GH_APP.repo + "/actions/workflows/run.yml/dispatches";
+    for (let a = 1; a <= 6; a++) {
+      const r = await gh("POST", path, { ref: "main", inputs: { language: language, entry: entry, token: token } });
+      if (r.status === 204) return;
+      if (r.status === 404 && a < 6) { await wait(2500); continue; }
+      if (r.status === 404) throw new Error("the runner repo has no run.yml workflow — recreate it from the template");
+      throw new Error("couldn't start the run (" + r.status + ")");
+    }
+  }
+  // Find OUR run by its token, never "the most recent" — that's what keeps
+  // concurrent users from stealing each other's results.
+  async function cloudFindRun(owner, token, sinceMs) {
+    for (let i = 0; i < 40; i++) {
+      const r = await gh("GET", "/repos/" + owner + "/" + GH_APP.repo + "/actions/runs?event=workflow_dispatch&per_page=30&t=" + Date.now());
+      if (r.ok) {
+        const j = await r.json();
+        const mine = (j.workflow_runs || []).filter((w) =>
+          ((w.display_title || "") + " " + (w.name || "")).indexOf(token) >= 0);
+        if (mine.length) return mine[0];
+      }
+      await wait(2500);
+    }
+    throw new Error("your run never appeared (GitHub may be busy — try again)");
+  }
+  async function cloudAwait(owner, runId) {
+    let last = "";
+    for (let i = 0; i < 80; i++) {
+      const r = await gh("GET", "/repos/" + owner + "/" + GH_APP.repo + "/actions/runs/" + runId + "?t=" + Date.now());
+      if (r.ok) {
+        const j = await r.json();
+        if (j.status !== last) { last = j.status; appendConsole("  " + j.status.replace("_", " ") + "…\n", false); }
+        if (j.status === "completed") return j;
+      }
+      await wait(2500);
+    }
+    throw new Error("the run is taking unusually long — check GitHub");
+  }
+  async function cloudRead(owner, token) {
+    const path = "runs/" + token + "/output.txt";
+    for (let i = 0; i < 10; i++) {
+      const r = await gh("GET", "/repos/" + owner + "/" + GH_APP.repo + "/contents/" + path + "?t=" + Date.now());
+      if (r.ok) {
+        const raw = b64dec((await r.json()).content || "");
+        const a = raw.indexOf(CLOUD_START), b = raw.indexOf(CLOUD_END);
+        if (a >= 0 && b > a) return raw.slice(a + CLOUD_START.length, b).replace(/^\n/, "").replace(/\n$/, "");
+        if (raw.trim()) return raw.trim();
+      }
+      await wait(2500);
+    }
+    throw new Error("the program ran but its output didn't come back");
+  }
+
+  let cloudBusy = false;
+  async function runCloud(file) {
+    if (cloudBusy) { flashConsole("A cloud run is already in progress.", false); return; }
+    if (!ghConfigured()) { showCloud(); return; }
+    if (!ghConnected()) { showCloud(); return; }
+    const proj = activeProject(), prof = profileOf(proj);
+    const language = (prof.run && prof.run.cloud) || prof.id;
+    const owner = ghUser.login;
+    const token = newRunToken();
+    cloudBusy = true;
+    showPane("console"); clearConsole();
+    setRuntime("cloud \u00b7 running", "loading");
+    appendConsole("Running " + (prof.name || language) + " on GitHub Actions…\n", false);
+    appendConsole("  (real Linux VM — first run of the day is the slowest)\n\n", false);
+    try {
+      await cloudPut(owner, "runs/" + token + "/" + file, proj.files[file] || "", "tinker run " + token);
+      appendConsole("  uploaded\n", false);
+      const t0 = Date.now();
+      await cloudDispatch(owner, language, file, token);
+      appendConsole("  queued\n", false);
+      const run = await cloudFindRun(owner, token, t0);
+      const done = await cloudAwait(owner, run.id);
+      appendConsole("\n", false);
+      const out = await cloudRead(owner, token);
+      writeOut(out.endsWith("\n") ? out : out + "\n");
+      if (done.conclusion !== "success") {
+        appendConsole("\n(the job reported '" + done.conclusion + "' — if that's unexpected, see " + run.html_url + ")\n", true);
+      }
+      setRuntime("cloud \u00b7 done", "ready");
+    } catch (e) {
+      writeErr("\nCloud run failed: " + ((e && e.message) || e) + "\n");
+      setRuntime("cloud \u00b7 error", "");
+    } finally { cloudBusy = false; }
+  }
+
+  /* ---- the Cloud panel ---- */
+  function showCloud() {
+    const c = ghCfg();
+    const cfgFields =
+      '<label>GitHub App Client ID</label><input type="text" id="gc-id" spellcheck="false" placeholder="Iv23…" value="' + escapeHtml(c.clientId) + '" />' +
+      '<label>Worker URL (ends in /exchange)</label><input type="text" id="gc-worker" spellcheck="false" placeholder="https://…workers.dev/exchange" value="' + escapeHtml(c.workerUrl) + '" />';
+
+    let body;
+    if (!ghConfigured()) {
+      body = '<p style="font-size:12.5px;color:var(--dim);margin:0 0 14px">Cloud run compiles languages like C, Rust, Go and Java on a real Linux machine using GitHub\'s free Actions runners. Set it up once:</p>' + cfgFields;
+    } else if (!ghConnected()) {
+      body =
+        '<p style="font-size:12.5px;color:var(--dim);margin:0 0 14px">Run C, C++, Rust, Go and Java on a real Linux VM — free, on your own GitHub Actions quota.</p>' +
+        '<div class="prof-row"><div class="pmeta">' +
+          '<div class="pname">One-time setup</div>' +
+          '<div class="pdesc">1 · <a href="https://github.com/' + escapeHtml(c.templateOwner) + '/tinker-runner-template/generate?name=tinker-runner" target="_blank" rel="noopener" style="color:var(--cyan)">create your runner repo</a> (needed once)</div>' +
+          '<div class="pdesc">2 · <a href="https://github.com/apps/' + escapeHtml(c.slug) + '/installations/new" target="_blank" rel="noopener" style="color:var(--cyan)">install the Tinker app</a> on just that repo</div>' +
+          '<div class="pdesc">3 · connect below</div>' +
+        '</div></div>' +
+        '<div style="margin-top:12px"><button class="btn primary" id="gc-connect">Connect GitHub</button></div>' +
+        '<details style="margin-top:14px"><summary style="cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--dim)">Configuration</summary>' + cfgFields + '</details>';
+    } else {
+      body =
+        '<div class="prof-row"><div class="pmeta">' +
+          '<div class="pname">' + escapeHtml(ghUser.login) + ' <span class="ptag">connected</span></div>' +
+          '<div class="pdesc">runs go to <code>' + escapeHtml(ghUser.login) + "/" + GH_APP.repo + '</code> on your own Actions quota</div>' +
+          '<div class="pdesc" style="color:var(--faint)">each run is isolated in its own folder, so sharing one repo with other people is safe</div>' +
+        '</div></div>' +
+        '<p style="font-size:12px;color:var(--dim);margin:12px 0 0">Languages: ' + Object.keys(CLOUD_LANGS).map((k) => CLOUD_LANGS[k].label).join(", ") + '. Python and web projects still run instantly in your browser.</p>' +
+        '<div style="margin-top:12px"><button class="btn" id="gc-disconnect">Disconnect</button></div>';
+    }
+
+    openModal("Cloud run", "Compile and run real languages on GitHub's servers.", body, () => {
+      const idEl = $("gc-id"), wkEl = $("gc-worker");
+      if (idEl && wkEl) {
+        if (!ws.ghCfg) ws.ghCfg = {};
+        ws.ghCfg.clientId = (idEl.value || "").trim();
+        ws.ghCfg.workerUrl = (wkEl.value || "").trim();
+        scheduleSave();
+      }
+      return true;
+    }, () => {
+      $("modal-ok").textContent = ghConfigured() && ghConnected() ? "Close" : "Save";
+      const cn = $("gc-connect"); if (cn) cn.addEventListener("click", () => {
+        const idEl = $("gc-id"), wkEl = $("gc-worker");
+        if (idEl && wkEl && idEl.value.trim() && wkEl.value.trim()) {
+          if (!ws.ghCfg) ws.ghCfg = {};
+          ws.ghCfg.clientId = idEl.value.trim(); ws.ghCfg.workerUrl = wkEl.value.trim();
+        }
+        ghStartAuth();
+      });
+      const dc = $("gc-disconnect"); if (dc) dc.addEventListener("click", () => { ghDisconnect(); closeModal(); showCloud(); });
+    });
   }
 
   /* ======================= linkable runtimes =======================
@@ -2459,6 +2813,7 @@ except Exception:
     $("settings-btn").addEventListener("click", showSettings);
     $("market-btn").addEventListener("click", showMarket);
     $("runtimes-btn").addEventListener("click", showRuntimes);
+    $("cloud-btn").addEventListener("click", showCloud);
     $("account-btn").addEventListener("click", showAccount);
     $("clear-console-btn").addEventListener("click", clearConsole);
     $("proj-picker").addEventListener("change", (e) => { if (e.target.value) switchProject(e.target.value); });
@@ -2493,6 +2848,8 @@ except Exception:
     ensurePyodide().catch(() => {});   // warm up Python in the background
     try { initCloud(); } catch (e) { console.error("cloud init failed", e); }
     initLanding();
+    try { await ghHandleCallback(); } catch (e) { console.error("github callback", e); }
+    try { await ghRestore(); } catch (e) { console.error("github restore", e); }
   }
   boot();
 })();
