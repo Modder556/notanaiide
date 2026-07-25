@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tinker — GitHub App cloud run test</title>
+<style>
+  :root { --bg:#14171c; --panel:#1a1e24; --raise:#22272f; --line:#2c333d; --text:#e9e5db;
+    --dim:#8b93a0; --amber:#e8a94b; --ok:#7fb37a; --err:#d9705f; --cyan:#6fb3c9; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+    font-family:ui-monospace,Menlo,Consolas,monospace; padding:24px; }
+  .wrap { max-width:760px; margin:0 auto; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  p.sub { color:var(--dim); font-size:12.5px; margin:0 0 18px; line-height:1.5; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+  h2 { font-size:12px; margin:0 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; }
+  label { display:block; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; margin:10px 0 5px; }
+  input, select, textarea { width:100%; background:var(--raise); border:1px solid var(--line); border-radius:7px;
+    padding:9px 10px; color:var(--text); font-family:inherit; font-size:12.5px; }
+  textarea { min-height:150px; resize:vertical; line-height:1.5; white-space:pre; }
+  .row { display:flex; gap:10px; } .row > * { flex:1; }
+  button { font-family:inherit; font-size:13px; font-weight:700; border:0; border-radius:7px;
+    background:var(--amber); color:#14171c; padding:11px 16px; cursor:pointer; }
+  button:hover { filter:brightness(1.07); } button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); font-weight:500; }
+  a.btnlink { display:inline-block; text-decoration:none; font-weight:700; font-size:12.5px;
+    background:var(--raise); border:1px solid var(--line); color:var(--cyan); padding:9px 13px; border-radius:7px; }
+  a.btnlink:hover { border-color:var(--cyan); }
+  .me { display:flex; align-items:center; gap:10px; font-size:12.5px; margin-top:12px; }
+  .me img { width:32px; height:32px; border-radius:50%; }
+  #log { background:#0f1216; border:1px solid var(--line); border-radius:9px; padding:12px 14px;
+    font-size:12px; line-height:1.65; white-space:pre-wrap; word-break:break-word; min-height:60px; max-height:280px; overflow:auto; }
+  #log .t{color:var(--dim);} #log .ok{color:var(--ok);} #log .err{color:var(--err);} #log .step{color:var(--amber);} #log .link{color:var(--cyan);}
+  #output { background:#0f1216; border:1px solid var(--line); border-radius:9px; padding:14px;
+    font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word; display:none; }
+  .hidden { display:none; } .muted { color:var(--dim); font-size:11.5px; }
+  .steps { font-size:12.5px; line-height:1.7; color:var(--dim); }
+  .steps b { color:var(--text); } code { color:var(--amber); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GitHub App cloud run test</h1>
+  <p class="sub">Same pipeline that already works, but authenticating through a GitHub <b>App</b> — fine-grained access to just your runner repo, no scary "all repos" screen. Prove this green and it folds into Tinker.</p>
+
+  <!-- config -->
+  <div class="card">
+    <h2>Config (fill once — remembered)</h2>
+    <div class="row">
+      <div><label>App Client ID</label><input id="clientId" placeholder="Iv23xxxx" spellcheck="false" /></div>
+      <div><label>App slug (from its URL: /apps/<b>slug</b>)</label><input id="appSlug" placeholder="tinker-run" spellcheck="false" /></div>
+    </div>
+    <div class="row">
+      <div><label>Worker URL (/exchange)</label><input id="workerUrl" placeholder="https://tinkerworker.xxxx.workers.dev/exchange" spellcheck="false" /></div>
+      <div><label>Template owner (your GitHub username)</label><input id="tplOwner" placeholder="Modder556" spellcheck="false" /></div>
+    </div>
+  </div>
+
+  <!-- one-time setup -->
+  <div class="card">
+    <h2>One-time setup (per user)</h2>
+    <div class="steps">
+      <b>1.</b> Create your runner repo from the template:
+      <div style="margin:8px 0 14px"><a class="btnlink" id="tplLink" target="_blank" rel="noopener">Create tinker-runner ↗</a></div>
+      <b>2.</b> Install the Tinker app on that repo (pick "only select repositories" → tinker-runner):
+      <div style="margin:8px 0 14px"><a class="btnlink" id="installLink" target="_blank" rel="noopener">Install Tinker ↗</a></div>
+      <b>3.</b> Connect:
+      <div style="margin:8px 0 0"><button id="connectBtn">Connect GitHub</button></div>
+      <div id="linkedBox" class="hidden"></div>
+    </div>
+  </div>
+
+  <!-- run -->
+  <div class="card hidden" id="runCard">
+    <h2>Run</h2>
+    <div class="row">
+      <div><label>Language</label><select id="lang"></select></div>
+      <div style="flex:0 0 auto; display:flex; align-items:flex-end"><button id="runBtn">Run on GitHub ▶</button></div>
+    </div>
+    <label>Program</label>
+    <textarea id="code" spellcheck="false"></textarea>
+    <p class="muted" style="margin-top:8px">Runs on <b>your</b> Actions quota via a fine-grained token scoped to just <code>tinker-runner</code>. ~30–60s.</p>
+  </div>
+
+  <div class="card"><h2>Log</h2><div id="log"><span class="t">Fill config, do the 3 setup steps, then Connect.</span></div></div>
+  <div class="card hidden" id="outCard"><h2>Program output</h2><div id="output"></div></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var REDIRECT = location.origin + location.pathname;
+  var REPO = "tinker-runner";
+  var START = "---TINKER-OUTPUT-START---", END = "---TINKER-OUTPUT-END---";
+  var token = null, ownerLogin = null;
+
+  var LANGS = {
+    python: { file:"main.py",   label:"Python", hello:'print("Hello from Actions via a GitHub App token")\nfor i in range(1, 6):\n    print(i, "squared is", i*i)\n' },
+    c:      { file:"main.c",    label:"C",      hello:'#include <stdio.h>\nint main(void){\n    printf("Hello from C on a real Linux VM\\n");\n    for (int i = 1; i <= 5; i++) printf("%d squared is %d\\n", i, i*i);\n    return 0;\n}\n' },
+    cpp:    { file:"main.cpp",  label:"C++",    hello:'#include <iostream>\nint main(){\n    std::cout << "Hello from C++\\n";\n    for (int i = 1; i <= 5; i++) std::cout << i << " squared is " << i*i << "\\n";\n}\n' },
+    rust:   { file:"main.rs",   label:"Rust",   hello:'fn main() {\n    println!("Hello from Rust");\n    for i in 1..=5 { println!("{} squared is {}", i, i*i); }\n}\n' },
+    go:     { file:"main.go",   label:"Go",     hello:'package main\nimport "fmt"\nfunc main() {\n    fmt.Println("Hello from Go")\n    for i := 1; i <= 5; i++ { fmt.Printf("%d squared is %d\\n", i, i*i) }\n}\n' },
+    java:   { file:"Main.java", label:"Java",   hello:'public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello from Java, fine-grained edition");\n        for (int i = 1; i <= 5; i++) System.out.println(i + " squared is " + (i*i));\n    }\n}\n' }
+  };
+
+  function log(msg, cls) { var el=$("log"), s=document.createElement("span"); s.className=cls||"t"; s.textContent=msg+"\n"; el.appendChild(s); el.scrollTop=el.scrollHeight; }
+  function b64encode(str){ return btoa(unescape(encodeURIComponent(str))); }
+  function b64decode(b64){ return decodeURIComponent(escape(atob(b64.replace(/\s/g,"")))); }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  function gh(method, path, body) {
+    var o={ method:method, headers:{ "Authorization":"Bearer "+token, "Accept":"application/vnd.github+json", "X-GitHub-Api-Version":"2022-11-28" } };
+    if (body){ o.body=JSON.stringify(body); o.headers["Content-Type"]="application/json"; }
+    return fetch("https://api.github.com"+path, o);
+  }
+
+  /* config persistence + derived links */
+  var cfgIds = ["clientId","appSlug","workerUrl","tplOwner"];
+  cfgIds.forEach(function(id){ try{ $(id).value = localStorage.getItem("ghapp_"+id) || ""; }catch(e){} $(id).addEventListener("input", refreshLinks); });
+  function saveCfg(){ cfgIds.forEach(function(id){ try{ localStorage.setItem("ghapp_"+id, $(id).value.trim()); }catch(e){} }); }
+  function refreshLinks(){
+    var owner=$("tplOwner").value.trim(), slug=$("appSlug").value.trim();
+    $("tplLink").href = owner ? ("https://github.com/"+owner+"/tinker-runner-template/generate?name=tinker-runner&owner="+owner) : "#";
+    $("installLink").href = slug ? ("https://github.com/apps/"+slug+"/installations/new") : "#";
+  }
+  refreshLinks();
+
+  /* language dropdown */
+  (function(){ var sel=$("lang"); Object.keys(LANGS).forEach(function(id){ var o=document.createElement("option"); o.value=id; o.textContent=LANGS[id].label; sel.appendChild(o); });
+    sel.addEventListener("change", function(){ $("code").value=LANGS[sel.value].hello; }); $("code").value=LANGS[sel.value].hello; })();
+
+  /* connect: GitHub App user authorization (no scope param — App permissions govern) */
+  function randomState(){ var a=new Uint8Array(16); crypto.getRandomValues(a); return Array.from(a).map(function(b){return b.toString(16).padStart(2,"0");}).join(""); }
+  $("connectBtn").addEventListener("click", function(){
+    var clientId=$("clientId").value.trim();
+    if(!clientId){ log("Enter the App Client ID first.","err"); return; }
+    saveCfg();
+    var state=randomState(); try{ sessionStorage.setItem("ghapp_state", state); }catch(e){}
+    location.href = "https://github.com/login/oauth/authorize"
+      + "?client_id="+encodeURIComponent(clientId)
+      + "&redirect_uri="+encodeURIComponent(REDIRECT)
+      + "&state="+encodeURIComponent(state);
+  });
+
+  /* handle callback */
+  (function(){
+    var p=new URLSearchParams(location.search);
+    if(p.get("error")){ log("GitHub error: "+p.get("error")+" — "+(p.get("error_description")||""),"err"); return; }
+    var code=p.get("code"); if(!code) return;
+    var saved=null; try{ saved=sessionStorage.getItem("ghapp_state"); }catch(e){}
+    if(!saved || saved!==p.get("state")){ log("State mismatch — aborting (CSRF guard).","err"); history.replaceState({},"",REDIRECT); return; }
+    history.replaceState({},"",REDIRECT);
+    connect(code);
+  })();
+
+  function connect(code){
+    var workerUrl=$("workerUrl").value.trim();
+    if(!workerUrl){ log("Have a code but no Worker URL set.","err"); return; }
+    log("Exchanging code for an App user token…","step");
+    fetch(workerUrl,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ code:code, redirect_uri:REDIRECT }) })
+      .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,j:j}; }); })
+      .then(function(res){
+        if(!res.ok || res.j.error) throw new Error(res.j.error+" "+(res.j.detail||""));
+        token=res.j.access_token;
+        log("Token received ✓","ok");
+        return gh("GET","/user").then(function(r){ return r.json(); });
+      })
+      .then(function(user){
+        if(!user||!user.login) throw new Error("couldn't read profile");
+        ownerLogin=user.login;
+        log("Connected as "+user.login+".","ok");
+        $("linkedBox").classList.remove("hidden");
+        $("linkedBox").innerHTML='<div class="me"><img src="'+user.avatar_url+'"/><div>connected as <b>'+user.login+'</b></div></div>';
+        return verifyRunnerRepo();
+      })
+      .catch(function(e){ log("Connect failed: "+e.message,"err"); });
+  }
+
+  /* verify the app can actually see tinker-runner (repo exists + app installed on it) */
+  function verifyRunnerRepo(){
+    log("Checking access to "+ownerLogin+"/"+REPO+"…","step");
+    return gh("GET","/repos/"+ownerLogin+"/"+REPO+"?t="+Date.now()).then(function(r){
+      if(r.ok){
+        log("Runner repo is reachable. Ready to run.","ok");
+        $("runCard").classList.remove("hidden");
+        return;
+      }
+      if(r.status===404){
+        log("Can't see "+REPO+". Two possible reasons:","err");
+        log("  • the repo doesn't exist yet → do setup step 1 (create from template)","t");
+        log("  • the app isn't installed on it → do setup step 2 (install), pick tinker-runner","t");
+        log("Then click Connect again.","t");
+        return;
+      }
+      log("Repo check returned "+r.status+".","err");
+    });
+  }
+
+  /* ---------- the pipeline (unchanged from the proven run test) ---------- */
+  async function getSha(path){
+    var r=await gh("GET","/repos/"+ownerLogin+"/"+REPO+"/contents/"+path+"?t="+Date.now());
+    if(r.status===404) return null;
+    if(!r.ok) throw new Error("contents GET "+path+" → "+r.status);
+    return (await r.json()).sha;
+  }
+  async function putFile(path, content, message){
+    var sha=await getSha(path).catch(function(){ return null; });
+    var body={ message:message, content:b64encode(content), branch:"main" };
+    if(sha) body.sha=sha;
+    var r=await gh("PUT","/repos/"+ownerLogin+"/"+REPO+"/contents/"+path, body);
+    if(!r.ok){ var t=await r.text(); throw new Error("commit "+path+" → "+r.status+" "+t.slice(0,160)); }
+  }
+  async function dispatchWithRetry(language, entry){
+    var path="/repos/"+ownerLogin+"/"+REPO+"/actions/workflows/run.yml/dispatches";
+    for(var a=1;a<=6;a++){
+      var r=await gh("POST",path,{ ref:"main", inputs:{ language:language, entry:entry } });
+      if(r.status===204) return;
+      if(r.status===404 && a<6){ await sleep(3000); continue; }
+      var t=await r.text(); throw new Error("dispatch → "+r.status+" "+t.slice(0,160));
+    }
+  }
+  async function waitForRun(sinceMs){
+    for(var i=0;i<30;i++){
+      var r=await gh("GET","/repos/"+ownerLogin+"/"+REPO+"/actions/runs?event=workflow_dispatch&per_page=5&t="+Date.now());
+      if(r.ok){ var j=await r.json();
+        var runs=(j.workflow_runs||[]).filter(function(w){ return new Date(w.created_at).getTime()>=sinceMs-30000; });
+        runs.sort(function(a,b){ return new Date(b.created_at)-new Date(a.created_at); });
+        if(runs.length) return runs[0];
+      }
+      await sleep(3000);
+    }
+    throw new Error("the run never appeared (timed out)");
+  }
+  async function waitForCompletion(runId){
+    for(var i=0;i<60;i++){
+      var r=await gh("GET","/repos/"+ownerLogin+"/"+REPO+"/actions/runs/"+runId+"?t="+Date.now());
+      if(r.ok){ var j=await r.json(); if(j.status==="completed") return j; }
+      await sleep(3000);
+    }
+    throw new Error("run didn't finish in time (check the link above)");
+  }
+  async function readOutput(){
+    for(var i=0;i<8;i++){
+      var r=await gh("GET","/repos/"+ownerLogin+"/"+REPO+"/contents/run-output.txt?t="+Date.now());
+      if(r.ok){ var j=await r.json(); var raw=b64decode(j.content||"");
+        var a=raw.indexOf(START), b=raw.indexOf(END);
+        if(a>=0&&b>a) return raw.slice(a+START.length,b).replace(/^\n/,"").replace(/\n$/,"");
+        if(raw.trim()) return raw.trim();
+      }
+      await sleep(2500);
+    }
+    throw new Error("couldn't read run-output.txt (open the run link — the job may have failed early)");
+  }
+
+  async function runPipeline(){
+    $("runBtn").disabled=true; $("outCard").classList.add("hidden"); $("output").style.display="none";
+    var lang=LANGS[$("lang").value], src=$("code").value;
+    try {
+      log("Committing your "+lang.label+" program…","step");
+      await putFile(lang.file, src, "run "+lang.file);
+      var t0=Date.now();
+      log("Triggering the workflow…","step");
+      await dispatchWithRetry($("lang").value, lang.file);
+      log("Triggered. Waiting for the VM…","t");
+      var run=await waitForRun(t0);
+      log("Run picked up: #"+run.run_number,"t");
+      var ls=document.createElement("span"); ls.className="link"; ls.textContent=run.html_url+"\n"; $("log").appendChild(ls);
+      var done=await waitForCompletion(run.id);
+      log("Run finished: "+done.conclusion, done.conclusion==="success"?"ok":"err");
+      log("Reading output…","step");
+      var out=await readOutput();
+      $("outCard").classList.remove("hidden"); $("output").style.display="block"; $("output").textContent=out;
+      log("Done. ✓","ok");
+    } catch(e){ log("Pipeline error: "+e.message,"err"); }
+    finally { $("runBtn").disabled=false; }
+  }
+  $("runBtn").addEventListener("click", runPipeline);
+})();
+</script>
+</body>
+</html>
