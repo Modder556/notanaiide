@@ -468,7 +468,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 10</span>
+    <span id="build-tag">build 11</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -946,7 +946,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
   async function doSave() {
     if (!persistOK) { setSaveState("blocked"); return; }
     try {
-      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings, runtimes: ws.runtimes || {}, ghCfg: ws.ghCfg || {} }));
+      await idbSet("workspace", JSON.stringify({ projects: ws.projects, active: ws.active, customProfiles: customProfileYaml, settings: settings, runtimes: ws.runtimes || {}, ghCfg: ws.ghCfg || {}, cloudOK: ws.cloudOK || {} }));
       setSaveState("saved");
       scheduleCloudPush();
     } catch (e) {
@@ -1002,6 +1002,7 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     if (!ws) ws = { projects: {}, active: null };
     if (!ws.runtimes) ws.runtimes = window.__pendingRuntimes || {};
     if (!ws.ghCfg) ws.ghCfg = window.__pendingGhCfg || {};
+    if (!ws.cloudOK) ws.cloudOK = {};
     if (ws.active && ws.projects[ws.active]) {
       const first = Object.keys(activeProject().files)[0];
       session.open[ws.active] = first ? [first] : [];
@@ -2246,14 +2247,19 @@ except Exception:
 
   const CLOUD_LANGS = {
     c:    { label:"C",    ext:".c",    mono:"c",    entry:"main.c",    icon:"\u25C7", color:"#7f9fc4",
+            cmd:'gcc "$ENTRY" -o ./prog && ./prog',
             hello:'#include <stdio.h>\n\nint main(void) {\n    printf("Hello from C\\n");\n    for (int i = 1; i <= 5; i++)\n        printf("%d squared is %d\\n", i, i * i);\n    return 0;\n}\n' },
     cpp:  { label:"C++",  ext:".cpp",  mono:"cpp",  entry:"main.cpp",  icon:"\u25C8", color:"#8f9fd4",
+            cmd:'g++ -std=c++17 "$ENTRY" -o ./prog && ./prog',
             hello:'#include <iostream>\n\nint main() {\n    std::cout << "Hello from C++\\n";\n    for (int i = 1; i <= 5; i++)\n        std::cout << i << " squared is " << i * i << "\\n";\n}\n' },
     rust: { label:"Rust", ext:".rs",   mono:"rust", entry:"main.rs",   icon:"\u2699", color:"#d08a5a",
+            cmd:'rustc "$ENTRY" -o ./prog && ./prog',
             hello:'fn main() {\n    println!("Hello from Rust");\n    for i in 1..=5 {\n        println!("{} squared is {}", i, i * i);\n    }\n}\n' },
     go:   { label:"Go",   ext:".go",   mono:"go",   entry:"main.go",   icon:"\u25C6", color:"#6fb3c9",
+            cmd:'go run "$ENTRY"',
             hello:'package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello from Go")\n    for i := 1; i <= 5; i++ {\n        fmt.Printf("%d squared is %d\\n", i, i*i)\n    }\n}\n' },
     java: { label:"Java", ext:".java", mono:"java", entry:"Main.java", icon:"\u2615", color:"#c98f6f",
+            cmd:'mkdir -p ./jc && javac -d ./jc "$ENTRY" && java -cp ./jc Main',
             hello:'public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello from Java");\n        for (int i = 1; i <= 5; i++)\n            System.out.println(i + " squared is " + (i * i));\n    }\n}\n' }
   };
 
@@ -2265,7 +2271,8 @@ except Exception:
       registerProfile({
         id: id, name: L.label, icon: L.icon, color: L.color,
         extensions: exts,
-        run: { strategy: "cloud", cloud: id, entry: L.entry },
+        run: { strategy: "cloud", cloud: id, entry: L.entry,
+               command: L.cmd, setup: L.setup || "", artifact: L.artifact || "" },
         files: files
       }, false);
     });
@@ -2369,10 +2376,11 @@ except Exception:
     const r = await gh("PUT", "/repos/" + owner + "/" + GH_APP.repo + "/contents/" + path, body);
     if (!r.ok) throw new Error("couldn't upload your code (" + r.status + ")");
   }
-  async function cloudDispatch(owner, language, entry, token) {
+  async function cloudDispatch(owner, spec, entry, token) {
     const path = "/repos/" + owner + "/" + GH_APP.repo + "/actions/workflows/run.yml/dispatches";
     for (let a = 1; a <= 6; a++) {
-      const r = await gh("POST", path, { ref: "main", inputs: { language: language, entry: entry, token: token } });
+      const r = await gh("POST", path, { ref: "main", inputs: {
+        entry: entry, token: token, command: spec.command, setup: spec.setup || "" } });
       if (r.status === 204) return;
       if (r.status === 404 && a < 6) { await wait(2500); continue; }
       if (r.status === 404) throw new Error("the runner repo has no run.yml workflow — recreate it from the template");
@@ -2428,7 +2436,11 @@ except Exception:
     if (!ghConfigured()) { showCloud(); return; }
     if (!ghConnected()) { showCloud(); return; }
     const proj = activeProject(), prof = profileOf(proj);
-    const language = (prof.run && prof.run.cloud) || prof.id;
+    const spec = { command: (prof.run && prof.run.command) || "", setup: (prof.run && prof.run.setup) || "" };
+    if (!spec.command) { flashConsole("This profile doesn't say how to run itself (run.command is missing).", true); return; }
+    // A community profile carries shell commands that will run on the user's own
+    // runner. Show them once and get an explicit yes before the first run.
+    if (prof.custom && !cloudApproved(prof.id)) { promptApproveCloud(prof, () => runCloud(file)); return; }
     // The owner comes from GitHub's own answer to "who is this token?", never
     // from config or the page. GitHub enforces this too — a user token can't
     // reach a repo its owner can't reach — but keep it unambiguous here.
@@ -2438,19 +2450,21 @@ except Exception:
     cloudBusy = true;
     showPane("console"); clearConsole();
     setRuntime("cloud \u00b7 running", "loading");
-    appendConsole("Running " + (prof.name || language) + " on GitHub Actions…\n", false);
+    appendConsole("Running " + (prof.name || "project") + " on GitHub Actions…\n", false);
     appendConsole("  (real Linux VM — first run of the day is the slowest)\n\n", false);
     try {
       await cloudPut(owner, "runs/" + token + "/" + file, proj.files[file] || "", "tinker run " + token);
       appendConsole("  uploaded\n", false);
       const t0 = Date.now();
-      await cloudDispatch(owner, language, file, token);
+      await cloudDispatch(owner, spec, file, token);
       appendConsole("  queued\n", false);
       const run = await cloudFindRun(owner, token, t0);
       const done = await cloudAwait(owner, run.id);
       appendConsole("\n", false);
       const out = await cloudRead(owner, token);
       writeOut(out.endsWith("\n") ? out : out + "\n");
+      const art = (prof.run && prof.run.artifact) || "";
+      if (art) showArtifact(owner, token, art);
       if (done.conclusion !== "success") {
         appendConsole("\n(the job reported '" + done.conclusion + "' — if that's unexpected, see " + run.html_url + ")\n", true);
       }
@@ -2459,6 +2473,51 @@ except Exception:
       writeErr("\nCloud run failed: " + ((e && e.message) || e) + "\n");
       setRuntime("cloud \u00b7 error", "");
     } finally { cloudBusy = false; }
+  }
+
+  /* ---- artifacts: profiles that produce a file (video, image) rather than text ---- */
+  function showArtifact(owner, token, artifact) {
+    const url = "https://raw.githubusercontent.com/" + owner + "/" + GH_APP.repo +
+                "/main/runs/" + token + "/" + artifact;
+    const ext = (artifact.split(".").pop() || "").toLowerCase();
+    const isVid = ["mp4", "webm", "mov"].indexOf(ext) >= 0;
+    const isImg = ["png", "jpg", "jpeg", "gif", "svg", "webp"].indexOf(ext) >= 0;
+    if (!isVid && !isImg) {
+      appendConsole("\nProduced " + artifact + " — " + url + "\n", false);
+      return;
+    }
+    const media = isVid
+      ? '<video src="' + url + '" controls autoplay loop style="max-width:100%;max-height:100%"></video>'
+      : '<img src="' + url + '" style="max-width:100%;max-height:100%" />';
+    $("preview-frame").srcdoc =
+      '<body style="margin:0;background:#101317;display:grid;place-items:center;height:100vh">' + media +
+      '<\/body>';
+    showPane("preview");
+    appendConsole("\nRendered " + artifact + " — shown in the Preview panel.\n", false);
+  }
+
+  /* ---- consent for community cloud profiles ---- */
+  function cloudApproved(id) {
+    return !!(ws && ws.cloudOK && ws.cloudOK[id]);
+  }
+  function promptApproveCloud(prof, then) {
+    const setup = (prof.run && prof.run.setup) || "";
+    const cmd = (prof.run && prof.run.command) || "";
+    openModal(
+      "Run " + escapeHtml(prof.name) + " on your runner?",
+      "This profile came from outside Tinker. These are the exact commands it will run on your own GitHub Actions machine.",
+      (setup ? '<label>Setup</label><pre style="margin:0;background:var(--bg-3);border:1px solid var(--border);border-radius:7px;padding:9px 10px;font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word">' + escapeHtml(setup) + '</pre>' : "") +
+      '<label>Run</label><pre style="margin:0;background:var(--bg-3);border:1px solid var(--border);border-radius:7px;padding:9px 10px;font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word">' + escapeHtml(cmd) + '</pre>' +
+      '<p style="font-size:11.5px;color:var(--faint);margin:12px 0 0">This runs on a throwaway VM on your own Actions quota, and can\'t reach your browser or your other repositories. It can still waste your free minutes, so only approve profiles you trust.</p>',
+      () => {
+        if (!ws.cloudOK) ws.cloudOK = {};
+        ws.cloudOK[prof.id] = true;
+        scheduleSave();
+        if (then) setTimeout(then, 0);
+        return true;
+      },
+      () => { $("modal-ok").textContent = "Approve & run"; }
+    );
   }
 
   /* ---- the Cloud panel ---- */
