@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tinker — cloud run test (GitHub Actions)</title>
+<style>
+  :root { --bg:#14171c; --panel:#1a1e24; --raise:#22272f; --line:#2c333d; --text:#e9e5db;
+    --dim:#8b93a0; --amber:#e8a94b; --ok:#7fb37a; --err:#d9705f; --cyan:#6fb3c9; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+    font-family:ui-monospace,Menlo,Consolas,monospace; padding:24px; }
+  .wrap { max-width:760px; margin:0 auto; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  p.sub { color:var(--dim); font-size:12.5px; margin:0 0 18px; line-height:1.5; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+  label { display:block; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; margin:10px 0 5px; }
+  input, select, textarea { width:100%; background:var(--raise); border:1px solid var(--line); border-radius:7px;
+    padding:9px 10px; color:var(--text); font-family:inherit; font-size:12.5px; }
+  textarea { min-height:170px; resize:vertical; line-height:1.5; white-space:pre; }
+  .row { display:flex; gap:10px; }
+  .row > * { flex:1; }
+  button { font-family:inherit; font-size:13px; font-weight:700; border:0; border-radius:7px;
+    background:var(--amber); color:#14171c; padding:11px 16px; cursor:pointer; }
+  button:hover { filter:brightness(1.07); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); font-weight:500; }
+  .me { display:flex; align-items:center; gap:10px; font-size:12.5px; }
+  .me img { width:34px; height:34px; border-radius:50%; }
+  .me b { color:var(--text); }
+  #log { background:#0f1216; border:1px solid var(--line); border-radius:9px; padding:12px 14px;
+    font-size:12px; line-height:1.65; white-space:pre-wrap; word-break:break-word; min-height:60px; max-height:280px; overflow:auto; }
+  #log .t { color:var(--dim); } #log .ok { color:var(--ok); } #log .err { color:var(--err); }
+  #log .step { color:var(--amber); } #log .link { color:var(--cyan); }
+  #output { background:#0f1216; border:1px solid var(--line); border-radius:9px; padding:14px;
+    font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word; color:var(--text); display:none; }
+  .hidden { display:none; }
+  .muted { color:var(--dim); font-size:11.5px; }
+  h2 { font-size:13px; margin:0 0 8px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Cloud run test — GitHub Actions</h1>
+  <p class="sub">Proves the whole pipeline end to end: link GitHub → create a runner repo on your account → commit code + a workflow → trigger it → wait → read the program's output back. Once this is green, the same logic folds into Tinker.</p>
+
+  <!-- config + link -->
+  <div class="card" id="cfgCard">
+    <h2>1 · Connect</h2>
+    <label>OAuth app Client ID</label>
+    <input id="clientId" placeholder="Ov23xxxx" spellcheck="false" />
+    <label>Worker URL (ends in /exchange)</label>
+    <input id="workerUrl" placeholder="https://tinkerworker.xxxx.workers.dev/exchange" spellcheck="false" />
+    <div style="margin-top:14px"><button id="linkBtn">Link GitHub</button></div>
+    <div id="linkedBox" class="hidden" style="margin-top:14px"></div>
+  </div>
+
+  <!-- run -->
+  <div class="card hidden" id="runCard">
+    <h2>2 · Run</h2>
+    <div class="row">
+      <div>
+        <label>Language</label>
+        <select id="lang"></select>
+      </div>
+      <div style="flex:0 0 auto; display:flex; align-items:flex-end">
+        <button id="runBtn">Run on GitHub ▶</button>
+      </div>
+    </div>
+    <label>Program</label>
+    <textarea id="code" spellcheck="false"></textarea>
+    <p class="muted" style="margin-top:8px">Runs on a real Ubuntu VM on <b>your</b> Actions quota. First run also creates the <code>tinker-runner</code> repo and commits the workflow. Expect ~30–60s.</p>
+  </div>
+
+  <!-- log -->
+  <div class="card">
+    <h2>Log</h2>
+    <div id="log"><span class="t">Waiting to connect…</span></div>
+  </div>
+
+  <!-- output -->
+  <div class="card hidden" id="outCard">
+    <h2>Program output</h2>
+    <div id="output"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var REDIRECT = location.origin + location.pathname;
+  var REPO = "tinker-runner";
+  var WF_PATH = ".github/workflows/run.yml";
+  var START = "---TINKER-OUTPUT-START---", END = "---TINKER-OUTPUT-END---";
+  var token = null, ownerLogin = null;
+
+  var LANGS = {
+    python: { file:"main.py",   label:"Python", hello:'print("Hello from Actions — real CPython, not WASM")\nfor i in range(1, 6):\n    print(i, "squared is", i*i)\n' },
+    c:      { file:"main.c",    label:"C",      hello:'#include <stdio.h>\nint main(void){\n    printf("Hello from C on a real Linux VM\\n");\n    for (int i = 1; i <= 5; i++) printf("%d squared is %d\\n", i, i*i);\n    return 0;\n}\n' },
+    cpp:    { file:"main.cpp",  label:"C++",    hello:'#include <iostream>\nint main(){\n    std::cout << "Hello from C++\\n";\n    for (int i = 1; i <= 5; i++) std::cout << i << " squared is " << i*i << "\\n";\n}\n' },
+    rust:   { file:"main.rs",   label:"Rust",   hello:'fn main() {\n    println!("Hello from Rust");\n    for i in 1..=5 { println!("{} squared is {}", i, i*i); }\n}\n' },
+    go:     { file:"main.go",   label:"Go",     hello:'package main\nimport "fmt"\nfunc main() {\n    fmt.Println("Hello from Go")\n    for i := 1; i <= 5; i++ { fmt.Printf("%d squared is %d\\n", i, i*i) }\n}\n' },
+    java:   { file:"Main.java", label:"Java",   hello:'public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello from Java — the one that started this");\n        for (int i = 1; i <= 5; i++) System.out.println(i + " squared is " + (i*i));\n    }\n}\n' }
+  };
+
+  // The workflow. Note: ${{ }} is escaped as \${{ }} so the JS template literal
+  // leaves it intact for GitHub to evaluate. Toolchains are preinstalled on ubuntu-latest.
+  var WORKFLOW = `name: tinker-run
+on:
+  workflow_dispatch:
+    inputs:
+      language:
+        description: language id
+        required: true
+      entry:
+        description: entry file
+        required: true
+permissions:
+  contents: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run program
+        env:
+          LANG_ID: \${{ github.event.inputs.language }}
+          ENTRY: \${{ github.event.inputs.entry }}
+        run: |
+          set +e
+          {
+            echo "${START}"
+            case "$LANG_ID" in
+              python) python3 "$ENTRY" ;;
+              c)      gcc "$ENTRY" -o /tmp/prog && /tmp/prog ;;
+              cpp)    g++ -std=c++17 "$ENTRY" -o /tmp/prog && /tmp/prog ;;
+              rust)   rustc "$ENTRY" -o /tmp/prog && /tmp/prog ;;
+              go)     go run "$ENTRY" ;;
+              java)   mkdir -p /tmp/jc && javac -d /tmp/jc "$ENTRY" && java -cp /tmp/jc Main ;;
+              *)      echo "unknown language: $LANG_ID" ;;
+            esac
+            echo ""
+            echo "${END}"
+          } > run-output.txt 2>&1
+          echo "----- captured -----"; cat run-output.txt
+      - name: Commit output
+        run: |
+          git config user.name "tinker-bot"
+          git config user.email "tinker-bot@users.noreply.github.com"
+          git add run-output.txt
+          git commit -m "run output [skip ci]" || echo "nothing to commit"
+          git push
+`;
+
+  /* ---------- small helpers ---------- */
+  function log(msg, cls) {
+    var el = $("log"), s = document.createElement("span");
+    s.className = cls || "t"; s.textContent = msg + "\n";
+    el.appendChild(s); el.scrollTop = el.scrollHeight;
+  }
+  function b64encode(str) { return btoa(unescape(encodeURIComponent(str))); }
+  function b64decode(b64) { return decodeURIComponent(escape(atob(b64.replace(/\s/g, "")))); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function gh(method, path, body) {
+    var opts = { method: method, headers: {
+      "Authorization": "Bearer " + token,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28"
+    } };
+    if (body) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
+    return fetch("https://api.github.com" + path, opts);
+  }
+
+  /* ---------- config persistence ---------- */
+  try {
+    $("clientId").value = localStorage.getItem("gh_client_id") || "";
+    $("workerUrl").value = localStorage.getItem("gh_worker_url") || "";
+  } catch (e) {}
+  function saveCfg() {
+    try {
+      localStorage.setItem("gh_client_id", $("clientId").value.trim());
+      localStorage.setItem("gh_worker_url", $("workerUrl").value.trim());
+    } catch (e) {}
+  }
+
+  /* ---------- populate language dropdown ---------- */
+  (function () {
+    var sel = $("lang");
+    Object.keys(LANGS).forEach(function (id) {
+      var o = document.createElement("option"); o.value = id; o.textContent = LANGS[id].label; sel.appendChild(o);
+    });
+    sel.addEventListener("change", function () { $("code").value = LANGS[sel.value].hello; });
+    $("code").value = LANGS[sel.value].hello;
+  })();
+
+  /* ---------- OAuth link (scope stepped up for repo + actions) ---------- */
+  function randomState() {
+    var a = new Uint8Array(16); crypto.getRandomValues(a);
+    return Array.from(a).map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+  }
+  $("linkBtn").addEventListener("click", function () {
+    var clientId = $("clientId").value.trim();
+    if (!clientId) { log("Enter your Client ID first.", "err"); return; }
+    saveCfg();
+    var state = randomState();
+    try { sessionStorage.setItem("gh_run_state", state); } catch (e) {}
+    location.href = "https://github.com/login/oauth/authorize"
+      + "?client_id=" + encodeURIComponent(clientId)
+      + "&redirect_uri=" + encodeURIComponent(REDIRECT)
+      + "&scope=" + encodeURIComponent("public_repo workflow")
+      + "&state=" + encodeURIComponent(state);
+  });
+
+  function showLinked(user) {
+    $("linkedBox").classList.remove("hidden");
+    $("linkedBox").innerHTML = '<div class="me"><img src="' + user.avatar_url + '"/><div>linked as <b>' + user.login + '</b> · scope lets Tinker use your public repos + Actions</div></div>';
+    $("runCard").classList.remove("hidden");
+  }
+
+  // handle callback
+  (function () {
+    var params = new URLSearchParams(location.search);
+    if (params.get("error")) { log("GitHub error: " + params.get("error") + " — " + (params.get("error_description") || ""), "err"); return; }
+    var code = params.get("code");
+    if (!code) return;
+    var saved = null; try { saved = sessionStorage.getItem("gh_run_state"); } catch (e) {}
+    if (!saved || saved !== params.get("state")) { log("State mismatch — aborting (CSRF guard).", "err"); history.replaceState({}, "", REDIRECT); return; }
+    history.replaceState({}, "", REDIRECT);
+    exchangeAndLoad(code);
+  })();
+
+  function exchangeAndLoad(code) {
+    var workerUrl = ($("workerUrl").value || "").trim();
+    if (!workerUrl) { log("Have a code but no Worker URL set.", "err"); return; }
+    log("Exchanging code for a token…", "step");
+    fetch(workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ code: code, redirect_uri: REDIRECT }) })
+      .then(function (r) { return r.json().then(function (j) { return { ok:r.ok, j:j }; }); })
+      .then(function (res) {
+        if (!res.ok || res.j.error) throw new Error(res.j.error + " " + (res.j.detail || ""));
+        token = res.j.access_token;
+        log("Token received ✓ (scope: " + (res.j.scope || "?") + ")", "ok");
+        return gh("GET", "/user").then(function (r) { return r.json(); });
+      })
+      .then(function (user) {
+        if (!user || !user.login) throw new Error("couldn't read profile");
+        ownerLogin = user.login;
+        log("Connected as " + user.login + ".", "ok");
+        showLinked(user);
+      })
+      .catch(function (e) { log("Connect failed: " + e.message, "err"); });
+  }
+
+  /* ---------- the pipeline ---------- */
+  async function getSha(path) {
+    var r = await gh("GET", "/repos/" + ownerLogin + "/" + REPO + "/contents/" + path + "?t=" + Date.now());
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error("contents GET " + path + " → " + r.status);
+    var j = await r.json();
+    return j.sha;
+  }
+  async function putFile(path, content, message) {
+    var sha = await getSha(path).catch(function () { return null; });
+    var body = { message: message, content: b64encode(content), branch: "main" };
+    if (sha) body.sha = sha;
+    var r = await gh("PUT", "/repos/" + ownerLogin + "/" + REPO + "/contents/" + path, body);
+    if (!r.ok) { var t = await r.text(); throw new Error("commit " + path + " → " + r.status + " " + t.slice(0, 160)); }
+  }
+
+  async function ensureRepo() {
+    var r = await gh("GET", "/repos/" + ownerLogin + "/" + REPO);
+    if (r.ok) { log("Runner repo exists.", "t"); return; }
+    if (r.status !== 404) throw new Error("repo check → " + r.status);
+    log("Creating runner repo on your account…", "step");
+    var c = await gh("POST", "/user/repos", { name: REPO, private: false, auto_init: true, description: "Tinker cloud-run sandbox" });
+    if (!c.ok) { var t = await c.text(); throw new Error("repo create → " + c.status + " " + t.slice(0, 160)); }
+    log("Repo created: " + ownerLogin + "/" + REPO, "ok");
+    await sleep(1500); // let the default branch settle
+  }
+
+  async function runPipeline() {
+    $("runBtn").disabled = true;
+    $("outCard").classList.add("hidden"); $("output").style.display = "none";
+    var langId = $("lang").value, lang = LANGS[langId], src = $("code").value;
+    try {
+      await ensureRepo();
+
+      log("Writing workflow…", "step");
+      await putFile(WF_PATH, WORKFLOW, "add/update tinker workflow");
+
+      log("Committing your " + lang.label + " program…", "step");
+      await putFile(lang.file, src, "run " + lang.file);
+
+      var dispatchTime = Date.now();
+      log("Triggering the workflow…", "step");
+      await dispatchWithRetry(langId, lang.file);
+      log("Triggered. Waiting for the VM (this is the slow part)…", "t");
+
+      var run = await waitForRun(dispatchTime);
+      log("Run picked up: #" + run.run_number, "t");
+      var linkSpan = document.createElement("span");
+      linkSpan.className = "link"; linkSpan.textContent = run.html_url + "\n"; $("log").appendChild(linkSpan);
+
+      var done = await waitForCompletion(run.id);
+      log("Run finished: " + done.conclusion, done.conclusion === "success" ? "ok" : "err");
+
+      log("Reading output…", "step");
+      var out = await readOutput();
+      $("outCard").classList.remove("hidden");
+      $("output").style.display = "block";
+      $("output").textContent = out;
+      log("Done. ✓", "ok");
+    } catch (e) {
+      log("Pipeline error: " + e.message, "err");
+    } finally {
+      $("runBtn").disabled = false;
+    }
+  }
+
+  async function dispatchWithRetry(language, entry) {
+    var path = "/repos/" + ownerLogin + "/" + REPO + "/actions/workflows/run.yml/dispatches";
+    for (var attempt = 1; attempt <= 6; attempt++) {
+      var r = await gh("POST", path, { ref: "main", inputs: { language: language, entry: entry } });
+      if (r.status === 204) return;
+      // 404 right after committing the workflow = GitHub hasn't registered it yet
+      if (r.status === 404 && attempt < 6) { await sleep(3000); continue; }
+      var t = await r.text();
+      throw new Error("dispatch → " + r.status + " " + t.slice(0, 160));
+    }
+  }
+
+  async function waitForRun(sinceMs) {
+    for (var i = 0; i < 30; i++) {
+      var r = await gh("GET", "/repos/" + ownerLogin + "/" + REPO + "/actions/runs?event=workflow_dispatch&per_page=5&t=" + Date.now());
+      if (r.ok) {
+        var j = await r.json();
+        var runs = (j.workflow_runs || []).filter(function (w) { return new Date(w.created_at).getTime() >= sinceMs - 30000; });
+        runs.sort(function (a, b) { return new Date(b.created_at) - new Date(a.created_at); });
+        if (runs.length) return runs[0];
+      }
+      await sleep(3000);
+    }
+    throw new Error("the run never appeared (timed out waiting for it to start)");
+  }
+
+  async function waitForCompletion(runId) {
+    for (var i = 0; i < 60; i++) {
+      var r = await gh("GET", "/repos/" + ownerLogin + "/" + REPO + "/actions/runs/" + runId + "?t=" + Date.now());
+      if (r.ok) {
+        var j = await r.json();
+        if (j.status === "completed") return j;
+      }
+      await sleep(3000);
+    }
+    throw new Error("run didn't finish in time (still going — check the link above)");
+  }
+
+  async function readOutput() {
+    // small retry: the output commit may land a moment after the run flips to completed
+    for (var i = 0; i < 8; i++) {
+      var r = await gh("GET", "/repos/" + ownerLogin + "/" + REPO + "/contents/run-output.txt?t=" + Date.now());
+      if (r.ok) {
+        var j = await r.json();
+        var raw = b64decode(j.content || "");
+        var a = raw.indexOf(START), b = raw.indexOf(END);
+        if (a >= 0 && b > a) return raw.slice(a + START.length, b).replace(/^\n/, "").replace(/\n$/, "");
+        if (raw.trim()) return raw.trim();  // no sentinels yet? show raw
+      }
+      await sleep(2500);
+    }
+    throw new Error("couldn't read run-output.txt (the workflow may have failed before writing it — open the run link)");
+  }
+
+  $("runBtn").addEventListener("click", runPipeline);
+})();
+</script>
+</body>
+</html>
