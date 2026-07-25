@@ -468,7 +468,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 9</span>
+    <span id="build-tag">build 10</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -2235,8 +2235,8 @@ except Exception:
 
   // ---- config: fill these two in and every user gets cloud run for free ----
   const GH_APP = {
-    clientId: "Iv23liBnMDTIHRwxF6JA",                       // <-- PASTE your GitHub App Client ID (Iv23…)
-    workerUrl: "https://tinkerworker.eli-b-atkins.workers.dev/exchange",                      // <-- PASTE your Worker URL ending in /exchange
+    clientId: "",                       // <-- PASTE your GitHub App Client ID (Iv23…)
+    workerUrl: "",                      // <-- PASTE your Worker URL ending in /exchange
     slug: "tinkeraction",
     templateOwner: "Modder556",
     repo: "tinker-runner"
@@ -2278,7 +2278,9 @@ except Exception:
       clientId: saved.clientId || GH_APP.clientId,
       workerUrl: saved.workerUrl || GH_APP.workerUrl,
       slug: saved.slug || GH_APP.slug,
-      owner: saved.owner || (ghUser && ghUser.login) || "",
+      // NOTE: deliberately no configurable "owner" — the target repo is always
+      // derived from the authenticated user, so nothing in saved config or the
+      // UI can ever aim a run at somebody else's repository.
       templateOwner: GH_APP.templateOwner,
       repo: GH_APP.repo
     };
@@ -2427,7 +2429,11 @@ except Exception:
     if (!ghConnected()) { showCloud(); return; }
     const proj = activeProject(), prof = profileOf(proj);
     const language = (prof.run && prof.run.cloud) || prof.id;
-    const owner = ghUser.login;
+    // The owner comes from GitHub's own answer to "who is this token?", never
+    // from config or the page. GitHub enforces this too — a user token can't
+    // reach a repo its owner can't reach — but keep it unambiguous here.
+    const owner = ghUser && ghUser.login;
+    if (!owner) { flashConsole("Not signed in to GitHub — open Cloud to connect.", true); return; }
     const token = newRunToken();
     cloudBusy = true;
     showPane("console"); clearConsole();
@@ -2474,6 +2480,13 @@ except Exception:
           '<div class="pdesc">2 · <a href="https://github.com/apps/' + escapeHtml(c.slug) + '/installations/new" target="_blank" rel="noopener" style="color:var(--cyan)">install the Tinker app</a> on just that repo</div>' +
           '<div class="pdesc">3 · connect below</div>' +
         '</div></div>' +
+        '<div class="prof-row" style="border-color:#5c4a30;background:#241f16">' +
+          '<div class="pmeta">' +
+            '<div class="pname" style="color:var(--accent)">Before you connect</div>' +
+            '<div class="pdesc" style="color:var(--dim)">Running a file <b>commits it to your runner repo</b>. If you made that repo public, anything you run is visible to anyone \u2014 don\u2019t put passwords, keys or private writing in a cloud project.</div>' +
+            '<div class="pdesc" style="color:var(--dim);margin-top:4px">Runs happen on your own GitHub account and use your own Actions minutes. You\u2019re responsible for what you run; Tinker is provided as-is, with no warranty.</div>' +
+          '</div>' +
+        '</div>' +
         '<div style="margin-top:12px"><button class="btn primary" id="gc-connect">Connect GitHub</button></div>' +
         '<details style="margin-top:14px"><summary style="cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--dim)">Configuration</summary>' + cfgFields + '</details>';
     } else {
