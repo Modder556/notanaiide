@@ -559,7 +559,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 16</span>
+    <span id="build-tag">build 17</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -1025,6 +1025,105 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
            "setposition","seth","pos","ht","st"):
     globals()[_n] = _bind(_n)
 `;
+
+  /* Some PyPI packages can't work in a browser because they need a real OS
+     (readchar wants a POSIX terminal). Where the idea still makes sense in a
+     browser, Tinker ships a stand-in with the same API. */
+  const SHIM_MODULES = {
+    readchar: {
+      re: /^[ \t]*(?:from[ \t]+readchar\b|import[ \t]+readchar\b)/m,
+      note: "readchar needs a real terminal, so Tinker is using a browser stand-in \u2014 it asks for a key in a popup.",
+      src: String.raw`
+"""Browser-native stand-in for readchar.
+
+The real readchar reads raw bytes from a POSIX terminal, which does not exist
+in a browser. This provides the same API using a synchronous prompt, so simple
+"press a key" programs work unchanged. It is NOT suitable for fast game loops -
+use turtle's onkey() for real-time input.
+"""
+import js
+
+class key(object):
+    UP = "\x1b[A"; DOWN = "\x1b[B"; RIGHT = "\x1b[C"; LEFT = "\x1b[D"
+    ENTER = "\r"; CR = "\r"; LF = "\n"
+    SPACE = " "; ESC = "\x1b"; TAB = "\t"
+    BACKSPACE = "\x7f"; DELETE = "\x1b[3~"
+    HOME = "\x1b[H"; END = "\x1b[F"
+    PAGE_UP = "\x1b[5~"; PAGE_DOWN = "\x1b[6~"
+    CTRL_C = "\x03"; CTRL_D = "\x04"
+    ESCAPE = ESC
+
+_WORDS = {
+    "up": key.UP, "down": key.DOWN, "left": key.LEFT, "right": key.RIGHT,
+    "w": "w", "a": "a", "s": "s", "d": "d",
+    "enter": key.ENTER, "return": key.ENTER, "space": key.SPACE,
+    "esc": key.ESC, "escape": key.ESC, "tab": key.TAB,
+    "backspace": key.BACKSPACE, "del": key.DELETE, "delete": key.DELETE,
+    "home": key.HOME, "end": key.END,
+    "quit": key.CTRL_C, "ctrl-c": key.CTRL_C, "ctrl+c": key.CTRL_C,
+}
+
+_PROMPT = ("Press a key\n\n"
+           "Type one character, or a word: up, down, left, right,\n"
+           "enter, space, esc, tab, backspace, quit")
+
+def _ask(prompt=None):
+    raw = js.prompt(prompt or _PROMPT)
+    if raw is None:
+        raise KeyboardInterrupt("input cancelled")
+    s = str(raw)
+    if s == "":
+        return key.ENTER
+    low = s.strip().lower()
+    if low in _WORDS:
+        return _WORDS[low]
+    return s[0]
+
+def readchar():
+    """One character. Arrow keys collapse to their final character."""
+    k = _ask()
+    return k[-1] if len(k) > 1 else k
+
+def readkey():
+    """One keypress, including multi-byte keys like the arrows."""
+    return _ask()
+
+def key_to_name(k):
+    for name in dir(key):
+        if name.startswith("_"):
+            continue
+        if getattr(key, name) == k:
+            return name
+    return k
+
+config = type("config", (), {"INTERRUPT_KEYS": [key.CTRL_C]})()
+`
+    }
+  };
+  function shimsNeeded(proj) {
+    const out = [];
+    Object.keys(SHIM_MODULES).forEach((name) => {
+      const re = SHIM_MODULES[name].re;
+      const hit = Object.keys(proj.files).some((f) => extOf(f) === "py" && re.test(proj.files[f] || ""));
+      if (hit) out.push(name);
+    });
+    return out;
+  }
+  function installShims(names, target) {
+    if (!names.length) return;
+    try { pyodide.FS.mkdir("/tinkerlib"); } catch (e) {}
+    names.forEach((name) => {
+      const m = SHIM_MODULES[name];
+      try {
+        pyodide.FS.writeFile("/tinkerlib/" + name + ".py", new TextEncoder().encode(m.src));
+        pyodide.runPython("import sys\nif '/tinkerlib' not in sys.path: sys.path.insert(0, '/tinkerlib')\nsys.modules.pop('" + name + "', None)");
+        if (m.note) {
+          if (target === "terminal") termPrint(m.note, "muted");
+          else appendConsole(m.note + "\n", false);
+        }
+      } catch (e) { console.error("shim failed", name, e); }
+    });
+  }
 
   function installTurtleModule() {
     try { pyodide.FS.mkdir("/tinkerlib"); } catch (e) {}
@@ -1839,7 +1938,9 @@ except Exception:
       outTarget = target;
     }
     syncProjectToFS();
-    await ensurePackages(proj, target);
+    const shims = shimsNeeded(proj);
+    await ensurePackages(proj, target, shims);
+    installShims(shims, target);
     outTarget = target;
     turtleListening = false;
     const chost = $("canvas-host"); if (chost) chost.classList.remove("listening");
@@ -1870,8 +1971,10 @@ except Exception:
     });
     return out;
   }
-  async function ensurePackages(proj, target) {
-    const want = projectPackages(proj).filter((p) => !installedPkgs[p]);
+  async function ensurePackages(proj, target, shims) {
+    const skip = shims || [];
+    const want = projectPackages(proj)
+      .filter((p) => !installedPkgs[p] && skip.indexOf(p) < 0);
     if (!want.length) return true;
     const say = (m, err) => {
       if (target === "terminal") termPrint(m, err ? "err" : "muted");
