@@ -213,6 +213,13 @@
     white-space: pre-wrap; word-break: break-word; color: var(--text);
   }
   #console-out .err { color: var(--danger); }
+  #console-out.awaiting-key { outline: 1px solid var(--accent); outline-offset: -1px; }
+  #console-out.awaiting-key::after {
+    content: "waiting for a key\2026";
+    position: sticky; bottom: 0; display: block; margin-top: 6px;
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+  }
+  #console-out:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
   #console-out .muted { color: var(--faint); }
   #term-host { height: 100%; padding: 6px 4px 4px 10px; }
   .xterm { height: 100%; }
@@ -559,7 +566,7 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 17</span>
+    <span id="build-tag">build 19</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
@@ -1030,69 +1037,107 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
      (readchar wants a POSIX terminal). Where the idea still makes sense in a
      browser, Tinker ships a stand-in with the same API. */
   const SHIM_MODULES = {
+    tinker: {
+      re: /^[ \t]*(?:from[ \t]+tinker\b|import[ \t]+tinker\b)/m,
+      note: "",
+      src: String.raw`
+"""Real-time keyboard input for browser Python.
+
+Write ordinary synchronous code - Tinker handles the browser side for you:
+
+    from tinker import readkey, key, clear
+
+    while True:
+        k = readkey()
+        if k == key.ESC:
+            break
+        if k == key.UP:
+            player_up()
+        clear()
+        draw()
+
+No popups: click the output panel once and every keypress goes to your program.
+"""
+import js
+
+class key(object):
+    UP = "up"; DOWN = "down"; LEFT = "left"; RIGHT = "right"
+    ENTER = "enter"; SPACE = "space"; ESC = "esc"; TAB = "tab"
+    BACKSPACE = "backspace"; DELETE = "delete"
+    W = "w"; A = "a"; S = "s"; D = "d"
+
+ARROWS = (key.UP, key.DOWN, key.LEFT, key.RIGHT)
+
+# arrows and WASD usually mean the same thing in a game
+_DIRS = {
+    key.UP: (0, -1), "w": (0, -1),
+    key.DOWN: (0, 1), "s": (0, 1),
+    key.LEFT: (-1, 0), "a": (-1, 0),
+    key.RIGHT: (1, 0), "d": (1, 0),
+}
+
+async def readkey():
+    """Wait for one keypress: 'up', 'a', 'space', 'esc', and so on."""
+    return str(await js.__tinker_wait_key())
+
+async def readchar():
+    """Like readkey, but named keys collapse to a single character."""
+    k = await readkey()
+    return k[0] if len(k) > 1 else k
+
+def direction(k):
+    """(dx, dy) for arrow or WASD keys, else None. y grows downward."""
+    return _DIRS.get(k)
+
+def is_arrow(k):
+    return k in ARROWS
+
+def clear():
+    """Clear the output panel - call before redrawing a grid."""
+    js.__tinker_clear_output()
+`
+    },
     readchar: {
       re: /^[ \t]*(?:from[ \t]+readchar\b|import[ \t]+readchar\b)/m,
-      note: "readchar needs a real terminal, so Tinker is using a browser stand-in \u2014 it asks for a key in a popup.",
+      note: "",
       src: String.raw`
 """Browser-native stand-in for readchar.
 
-The real readchar reads raw bytes from a POSIX terminal, which does not exist
-in a browser. This provides the same API using a synchronous prompt, so simple
-"press a key" programs work unchanged. It is NOT suitable for fast game loops -
-use turtle's onkey() for real-time input.
+The real readchar reads raw bytes from a POSIX terminal, which a browser does
+not have. This keeps the same API and the same key constants, but takes keys
+straight from the output panel - no dialogs. Tinker rewrites your calls so you
+still write ordinary synchronous code.
 """
 import js
 
 class key(object):
     UP = "\x1b[A"; DOWN = "\x1b[B"; RIGHT = "\x1b[C"; LEFT = "\x1b[D"
     ENTER = "\r"; CR = "\r"; LF = "\n"
-    SPACE = " "; ESC = "\x1b"; TAB = "\t"
+    SPACE = " "; ESC = "\x1b"; ESCAPE = "\x1b"; TAB = "\t"
     BACKSPACE = "\x7f"; DELETE = "\x1b[3~"
     HOME = "\x1b[H"; END = "\x1b[F"
     PAGE_UP = "\x1b[5~"; PAGE_DOWN = "\x1b[6~"
     CTRL_C = "\x03"; CTRL_D = "\x04"
-    ESCAPE = ESC
 
-_WORDS = {
+_FROM_BROWSER = {
     "up": key.UP, "down": key.DOWN, "left": key.LEFT, "right": key.RIGHT,
-    "w": "w", "a": "a", "s": "s", "d": "d",
-    "enter": key.ENTER, "return": key.ENTER, "space": key.SPACE,
-    "esc": key.ESC, "escape": key.ESC, "tab": key.TAB,
-    "backspace": key.BACKSPACE, "del": key.DELETE, "delete": key.DELETE,
-    "home": key.HOME, "end": key.END,
-    "quit": key.CTRL_C, "ctrl-c": key.CTRL_C, "ctrl+c": key.CTRL_C,
+    "enter": key.ENTER, "space": key.SPACE, "esc": key.ESC, "tab": key.TAB,
+    "backspace": key.BACKSPACE, "delete": key.DELETE,
 }
 
-_PROMPT = ("Press a key\n\n"
-           "Type one character, or a word: up, down, left, right,\n"
-           "enter, space, esc, tab, backspace, quit")
+async def readkey():
+    """Wait for one keypress, returned as real readchar key codes."""
+    name = str(await js.__tinker_wait_key())
+    return _FROM_BROWSER.get(name, name)
 
-def _ask(prompt=None):
-    raw = js.prompt(prompt or _PROMPT)
-    if raw is None:
-        raise KeyboardInterrupt("input cancelled")
-    s = str(raw)
-    if s == "":
-        return key.ENTER
-    low = s.strip().lower()
-    if low in _WORDS:
-        return _WORDS[low]
-    return s[0]
-
-def readchar():
-    """One character. Arrow keys collapse to their final character."""
-    k = _ask()
+async def readchar():
+    """One character; named keys collapse to their final character."""
+    k = await readkey()
     return k[-1] if len(k) > 1 else k
-
-def readkey():
-    """One keypress, including multi-byte keys like the arrows."""
-    return _ask()
 
 def key_to_name(k):
     for name in dir(key):
-        if name.startswith("_"):
-            continue
-        if getattr(key, name) == k:
+        if not name.startswith("_") and getattr(key, name) == k:
             return name
     return k
 
@@ -1123,6 +1168,114 @@ config = type("config", (), {"INTERRUPT_KEYS": [key.CTRL_C]})()
         }
       } catch (e) { console.error("shim failed", name, e); }
     });
+  }
+
+  /* Installed before every run: the source transform that lets people write
+     ordinary blocking code (k = readkey()) even though the browser needs it
+     to be awaited. */
+  const AUTOAWAIT_PY = String.raw`
+"""Rewrite plain synchronous code so blocking input works in a browser.
+
+A browser can't block, so readkey() is really a coroutine. Rather than making
+people write async def and await, this walks the syntax tree and does it for
+them: any function that reaches a blocking call becomes async, and calls to it
+are awaited. Repeated to a fixed point, so nested helpers work too.
+
+Calls are matched by their final name (obj.step() matches "step"), which can
+over-match - so every rewritten call goes through _tinker_aw(), which awaits
+only if the result is actually awaitable. Over-matching is therefore harmless,
+while under-matching would hang the tab comparing a coroutine forever.
+"""
+import ast
+
+BLOCKING_NAMES = {"readkey", "readchar", "getkey", "pause", "wait_key"}
+AW = "_tinker_aw"
+
+
+def _call_name(node):
+    f = node.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    return None
+
+
+class _Marker(ast.NodeVisitor):
+    def __init__(self, blocking):
+        self.blocking = blocking
+        self.found = set()
+        self.stack = []
+
+    def visit_FunctionDef(self, node):
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node):
+        pass
+
+    def visit_Call(self, node):
+        if _call_name(node) in self.blocking and self.stack:
+            self.found.add(self.stack[-1])
+        self.generic_visit(node)
+
+
+class _Rewriter(ast.NodeTransformer):
+    def __init__(self, blocking):
+        self.blocking = blocking
+
+    def visit_Lambda(self, node):
+        return node
+
+    def visit_FunctionDef(self, node):
+        self.generic_visit(node)
+        if node.name in self.blocking:
+            new = ast.AsyncFunctionDef(
+                name=node.name, args=node.args, body=node.body,
+                decorator_list=node.decorator_list, returns=node.returns,
+                type_comment=None,
+            )
+            if hasattr(node, "type_params"):
+                new.type_params = getattr(node, "type_params", [])
+            return ast.copy_location(new, node)
+        return node
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if _call_name(node) in self.blocking:
+            wrapped = ast.Call(func=ast.Name(id=AW, ctx=ast.Load()), args=[node], keywords=[])
+            ast.copy_location(wrapped, node)
+            return ast.copy_location(ast.Await(value=wrapped), node)
+        return node
+
+
+def transform(src, filename="main.py"):
+    tree = ast.parse(src, filename)
+    blocking = set(BLOCKING_NAMES)
+    for _ in range(16):
+        m = _Marker(blocking)
+        m.visit(tree)
+        merged = blocking | m.found
+        if merged == blocking:
+            break
+        blocking = merged
+    tree = _Rewriter(blocking).visit(tree)
+    ast.fix_missing_locations(tree)
+    return tree
+
+
+def needs_transform(src):
+    return any(n in src for n in BLOCKING_NAMES)
+`;
+  function installCore() {
+    try { pyodide.FS.mkdir("/tinkerlib"); } catch (e) {}
+    try {
+      pyodide.FS.writeFile("/tinkerlib/_tinkerauto.py", new TextEncoder().encode(AUTOAWAIT_PY));
+      pyodide.runPython("import sys\nif '/tinkerlib' not in sys.path: sys.path.insert(0, '/tinkerlib')\nsys.modules.pop('_tinkerauto', None)");
+    } catch (e) { console.error("core install failed", e); }
   }
 
   function installTurtleModule() {
@@ -1175,6 +1328,67 @@ config = type("config", (), {"INTERRUPT_KEYS": [key.CTRL_C]})()
       }
     });
   }
+  /* ---- real-time key input for console programs ----
+     A browser can't block on a keypress, so Python awaits one instead. The
+     console pane captures keys directly: no popups, no dialogs. */
+  let keyResolver = null, keyCapture = false;
+  const KEY_NAMES = {
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+    " ": "space", Enter: "enter", Escape: "esc", Tab: "tab",
+    Backspace: "backspace", Delete: "delete"
+  };
+  function setKeyCapture(on) {
+    keyCapture = !!on;
+    const host = $("console-out");
+    if (!host) return;
+    host.classList.toggle("awaiting-key", keyCapture);
+    if (keyCapture) {
+      host.setAttribute("tabindex", "0");
+      try { host.focus({ preventScroll: true }); } catch (e) { try { host.focus(); } catch (e2) {} }
+    }
+  }
+  window.__tinker_wait_key = function () {
+    showPane("console");
+    setKeyCapture(true);
+    return new Promise((resolve) => { keyResolver = resolve; });
+  };
+  window.__tinker_clear_output = function () { clearConsole(); };
+  function deliverKey(name) {
+    if (!keyResolver) return false;
+    const r = keyResolver;
+    keyResolver = null;
+    setKeyCapture(false);
+    r(name);
+    return true;
+  }
+  function initKeyInput() {
+    const host = $("console-out");
+    if (!host) return;
+    const onKey = (e) => {
+      if (!keyResolver) return;
+      const name = KEY_NAMES[e.key] || (e.key.length === 1 ? e.key : null);
+      if (!name) return;
+      e.preventDefault();
+      e.stopPropagation();
+      deliverKey(name);
+    };
+    host.addEventListener("keydown", onKey);
+    // also catch keys when focus drifts, as long as a program is waiting
+    document.addEventListener("keydown", (e) => {
+      if (!keyResolver) return;
+      if ($("modal-scrim").classList.contains("show")) return;
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.target && e.target.closest && e.target.closest(".monaco-editor")) return;
+      onKey(e);
+    });
+    host.addEventListener("click", () => { if (keyResolver) setKeyCapture(true); });
+  }
+  function cancelKeyWait() {
+    if (keyResolver) { const r = keyResolver; keyResolver = null; r("esc"); }
+    setKeyCapture(false);
+  }
+
   window.__tinker_turtle_render = renderTurtle;
 
   /* Interactive turtle: scr.listen() asks the canvas to capture keys. Tk key
@@ -1892,18 +2106,41 @@ files:
     const dot = $("rt-dot"); dot.className = "sb-dot" + (cls ? " " + cls : "");
   }
 
+  /* Compiled with PyCF_ALLOW_TOP_LEVEL_AWAIT, and run through the auto-await
+     transform first, so blocking input works without anyone writing `async`. */
   const RUN_WRAPPER =
-`import sys, os, traceback
+`import sys, os, traceback, ast, inspect
 os.chdir('/project')
 __f = __run_target__
 sys.argv = [__f]
+
+async def _tinker_aw(_v):
+    if inspect.isawaitable(_v):
+        return await _v
+    return _v
+
 try:
     with open(__f, 'r') as _fh:
         _src = _fh.read()
-    _code = compile(_src, __f, 'exec')
-    exec(_code, {'__name__': '__main__', '__file__': __f})
+    _obj = _src
+    try:
+        import _tinkerauto
+        if _tinkerauto.needs_transform(_src):
+            _obj = _tinkerauto.transform(_src, __f)
+    except SyntaxError:
+        _obj = _src
+    except Exception:
+        _obj = _src
+    _code = compile(_obj, __f, 'exec', flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    _g = {'__name__': '__main__', '__file__': __f, '_tinker_aw': _tinker_aw}
+    if _code.co_flags & inspect.CO_COROUTINE:
+        await eval(_code, _g)
+    else:
+        exec(_code, _g)
 except SystemExit:
     pass
+except KeyboardInterrupt:
+    print('stopped')
 except Exception:
     traceback.print_exc()
 `;
@@ -1938,6 +2175,8 @@ except Exception:
       outTarget = target;
     }
     syncProjectToFS();
+    cancelKeyWait();
+    installCore();
     const shims = shimsNeeded(proj);
     await ensurePackages(proj, target, shims);
     installShims(shims, target);
@@ -3454,6 +3693,7 @@ except Exception:
     try { initTerminal(); } catch (e) { console.error("terminal failed to load", e); }
     initDivider();
     initTurtleInput();
+    initKeyInput();
     wireEvents();
     try { initMonaco(); }
     catch (e) {
