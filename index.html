@@ -219,6 +219,14 @@
   #preview-frame { width: 100%; height: 100%; border: 0; background: #fff; }
   #canvas-host { width: 100%; height: 100%; display: grid; place-items: center; background: #101317; overflow: auto; }
   #turtle-canvas { background: #fff; border-radius: 4px; box-shadow: 0 2px 14px rgba(0,0,0,.35); }
+  #canvas-host.listening { outline: 1px solid var(--accent); outline-offset: -1px; }
+  #canvas-host.listening::after {
+    content: "click the canvas, then use your keys";
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 6px;
+    font-family: var(--mono); font-size: 10.5px; color: var(--faint); pointer-events: none;
+  }
+  #canvas-host:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .pane[data-pane="canvas"] { position: absolute; }
   #media-host {
     width: 100%; height: 100%; display: grid; place-content: center; justify-items: center;
     gap: 8px; padding: 10px; background: #101317; overflow: auto;
@@ -551,13 +559,14 @@
 
   <div id="statusbar">
     <span><span class="sb-dot loading" id="rt-dot"></span><span id="rt-status">starting python…</span></span>
-    <span id="build-tag">build 14</span>
+    <span id="build-tag">build 16</span>
     <span class="sb-spacer"></span>
     <span id="cursor-pos"></span>
     <span id="save-state">—</span>
   </div>
 </div>
 
+<input type="file" id="import-file" accept="application/json,.json" style="display:none" />
 <div id="modal-scrim"><div class="modal" id="modal-box"></div></div>
 
 <script>
@@ -746,21 +755,53 @@ import math, json, js
 _ops = []
 _bg = "#ffffff"
 _W, _H = 640, 480
+_colormode = 1.0
+_turtles = []
+_keys = {}
+_clicks = []
+_next_id = [0]
 
 def _emit(op): _ops.append(op)
 
+def colormode(cmode=None):
+    global _colormode
+    if cmode is None: return _colormode
+    _colormode = 255.0 if int(cmode) == 255 else 1.0
+    return _colormode
+
+def _chan(v):
+    # turtle accepts 0-1 floats or 0-255 ints; be forgiving either way
+    if isinstance(v, float) and v <= 1.0 and _colormode == 1.0:
+        return max(0, min(255, int(round(v * 255))))
+    return max(0, min(255, int(round(v))))
+
+def _color(*a):
+    if not a: return "#000000"
+    if len(a) >= 3:
+        return "rgb(%d,%d,%d)" % (_chan(a[0]), _chan(a[1]), _chan(a[2]))
+    c = a[0]
+    if isinstance(c, (tuple, list)):
+        return _color(*c)
+    if isinstance(c, (int, float)):
+        v = _chan(c)
+        return "rgb(%d,%d,%d)" % (v, v, v)
+    return str(c)
+
 class Turtle(object):
     def __init__(self):
+        _next_id[0] += 1
+        self._id = _next_id[0]
         self._x = 0.0; self._y = 0.0; self._h = 0.0
         self._down = True; self._w = 1.0
         self._pc = "#000000"; self._fc = "#000000"
         self._visible = True
         self._filling = False; self._fillpts = None; self._fillmark = 0
+        _turtles.append(self)
 
-    # --- movement ---
     def _goto(self, x, y, draw=True):
         if self._down and draw:
-            _emit({"t":"line","x1":self._x,"y1":self._y,"x2":x,"y2":y,"c":self._pc,"w":self._w})
+            _emit({"t":"line","x1":self._x,"y1":self._y,"x2":x,"y2":y,
+                   "c":self._pc,"w":self._w,"o":self._id})
         self._x = float(x); self._y = float(y)
         if self._filling: self._fillpts.append([self._x, self._y])
 
@@ -793,15 +834,15 @@ class Turtle(object):
 
     def dot(self, size=None, color=None):
         size = size or max(self._w + 4, 2 * self._w)
-        _emit({"t":"dot","x":self._x,"y":self._y,"r":size/2.0,"c":color or self._pc})
+        _emit({"t":"dot","x":self._x,"y":self._y,"r":size/2.0,
+               "c":_color(color) if color else self._pc,"o":self._id})
 
     def write(self, text, move=False, align="left", font=("Arial", 8, "normal")):
         try: fam, sz = font[0], font[1]
         except Exception: fam, sz = "Arial", 8
         _emit({"t":"text","x":self._x,"y":self._y,"s":str(text),"c":self._pc,
-               "font":str(sz)+"px "+str(fam),"align":align})
+               "font":str(sz)+"px "+str(fam),"align":align,"o":self._id})
 
-    # --- pen ---
     def penup(self): self._down = False
     def pendown(self): self._down = True
     def isdown(self): return self._down
@@ -816,18 +857,19 @@ class Turtle(object):
         self._fc = _color(*a)
     def color(self, *a):
         if not a: return (self._pc, self._fc)
-        if len(a) == 1: self._pc = self._fc = _color(a[0])
-        else: self._pc = _color(a[0]); self._fc = _color(a[1])
+        # color(r, g, b) is ONE colour; color(pen, fill) is two
+        if len(a) == 3 and all(isinstance(v, (int, float)) for v in a):
+            self._pc = self._fc = _color(*a); return
+        if len(a) == 1: self._pc = self._fc = _color(a[0]); return
+        self._pc = _color(a[0]); self._fc = _color(a[1])
 
     def begin_fill(self):
         self._filling = True; self._fillpts = [[self._x, self._y]]; self._fillmark = len(_ops)
     def end_fill(self):
         if self._filling and self._fillpts and len(self._fillpts) > 2:
-            # insert beneath the strokes drawn while filling, like real turtle
-            _ops.insert(self._fillmark, {"t":"poly","pts":self._fillpts,"c":self._fc})
+            _ops.insert(self._fillmark, {"t":"poly","pts":self._fillpts,"c":self._fc,"o":self._id})
         self._filling = False; self._fillpts = None
 
-    # --- state / no-ops ---
     def speed(self, *a): return 0
     def hideturtle(self): self._visible = False
     def showturtle(self): self._visible = True
@@ -837,24 +879,35 @@ class Turtle(object):
     def ycor(self): return self._y
     def heading(self): return self._h
     def clear(self):
+        # real turtle clears only THIS turtle's drawings
+        keep = [o for o in _ops if o.get("o") != self._id]
         del _ops[:]
+        _ops.extend(keep)
     def reset(self):
-        self.clear(); self.__init__()
+        self.clear()
+        self._x = self._y = self._h = 0.0
+        self._down = True; self._w = 1.0
+        self._pc = self._fc = "#000000"; self._visible = True
     def stamp(self):
-        _emit({"t":"turtle","x":self._x,"y":self._y,"h":self._h,"c":self._pc}); return 0
-    # aliases
+        _emit({"t":"turtle","x":self._x,"y":self._y,"h":self._h,"c":self._pc,"o":self._id}); return 0
+    def onkey(self, fun, key=None): _screen.onkey(fun, key)
+    def onclick(self, fun, *a, **k): _screen.onclick(fun)
+
     fd = forward; bk = backward; back = backward; rt = right; lt = left
     pu = penup; up = penup; pd = pendown; down = pendown
     width = pensize; setpos = goto; setposition = goto; seth = setheading
     pos = position; ht = hideturtle; st = showturtle
 
-def _color(*a):
-    if len(a) == 3:
-        return "rgb(%d,%d,%d)" % tuple(int(round(v * 255)) if isinstance(v, float) and v <= 1 else int(v) for v in a)
-    c = a[0]
-    if isinstance(c, (tuple, list)):
-        return _color(*c)
-    return str(c)
+def _js_listen():
+    # NB: called from module level - js.__name inside a class body would be
+    # name-mangled by Python into js._Screen__name and fail.
+    js.__tinker_turtle_listen()
+
+def _norm_key(k):
+    if k is None: return None
+    if k == " ": return "space"
+    if len(k) == 1: return k
+    return k
 
 class _Screen(object):
     def bgcolor(self, *a):
@@ -867,28 +920,81 @@ class _Screen(object):
     def screensize(self, w=None, h=None, bg=None):
         if w and h: self.setup(w, h)
         if bg: self.bgcolor(bg)
+    def colormode(self, cmode=None): return colormode(cmode)
     def title(self, *a): pass
     def tracer(self, *a, **k): pass
     def update(self): _flush()
-    def exitonclick(self): _flush()
-    def mainloop(self): _flush()
-    def listen(self, *a, **k): pass
-    def onkey(self, *a, **k): pass
-    def onclick(self, *a, **k): pass
+    def clear(self):
+        del _ops[:]
+    def reset(self):
+        self.clear()
+        for t in _turtles: t.reset()
+    def onkey(self, fun, key=None):
+        k = _norm_key(key)
+        if k is None: return
+        if fun is None: _keys.pop(k, None)
+        else: _keys[k] = fun
+    onkeypress = onkey
+    onkeyrelease = onkey
+    def onclick(self, fun, *a, **k):
+        del _clicks[:]
+        if fun: _clicks.append(fun)
+    onscreenclick = onclick
+    def listen(self, *a, **k):
+        _flush()
+        _js_listen()
+    def mainloop(self):
+        _flush()
+        if _keys or _clicks: _js_listen()
+    done = mainloop
+    exitonclick = mainloop
+    def bye(self): pass
+    def numinput(self, title, prompt, **k):
+        v = js.prompt(str(prompt))
+        try: return float(v)
+        except Exception: return None
+    def textinput(self, title, prompt): return js.prompt(str(prompt))
 
 _screen = _Screen()
 def Screen(): return _screen
 def getscreen(): return _screen
+Turtle.getscreen = lambda self: _screen
 
-_t = Turtle()
+# Real turtle only creates the default turtle when a module-level drawing
+# function is first used - so a program that makes its own Turtle() objects
+# never gets a stray extra turtle on screen.
+_t = None
+def _default():
+    global _t
+    if _t is None: _t = Turtle()
+    return _t
 
 def _flush():
     payload = {"w": _W, "h": _H, "bg": _bg, "ops": list(_ops)}
-    if _t._visible:
-        payload["ops"].append({"t":"turtle","x":_t._x,"y":_t._y,"h":_t._h,"c":_t._pc})
+    for t in _turtles:
+        if t._visible:
+            payload["ops"].append({"t":"turtle","x":t._x,"y":t._y,"h":t._h,"c":t._pc})
     js.__tinker_turtle_render(json.dumps(payload))
 
-def done(): _flush()
+def _dispatch_key(name):
+    fn = _keys.get(name)
+    if fn is None and name == " ": fn = _keys.get("space")
+    if fn is None: return False
+    try: fn()
+    except Exception:
+        import traceback; traceback.print_exc()
+    _flush()
+    return True
+
+def _dispatch_click(x, y):
+    if not _clicks: return False
+    try: _clicks[0](x, y)
+    except Exception:
+        import traceback; traceback.print_exc()
+    _flush()
+    return True
+
+def done(): _screen.mainloop()
 mainloop = done
 exitonclick = done
 def update(): _flush()
@@ -898,13 +1004,16 @@ def bgcolor(*a): return _screen.bgcolor(*a)
 def setup(*a, **k): return _screen.setup(*a, **k)
 def screensize(*a, **k): return _screen.screensize(*a, **k)
 def title(*a): pass
-def listen(*a, **k): pass
-def onkey(*a, **k): pass
-def onclick(*a, **k): pass
+def listen(*a, **k): return _screen.listen()
+def onkey(fun, key=None): return _screen.onkey(fun, key)
+onkeypress = onkey
+def onclick(fun, *a, **k): return _screen.onclick(fun)
+onscreenclick = onclick
+def clearscreen(): _screen.clear()
+def resetscreen(): _screen.reset()
 
-# module-level functions bound to the default turtle
 def _bind(name):
-    def fn(*a, **k): return getattr(_t, name)(*a, **k)
+    def fn(*a, **k): return getattr(_default(), name)(*a, **k)
     fn.__name__ = name
     return fn
 
@@ -968,6 +1077,54 @@ for _n in ("forward","backward","right","left","goto","setx","sety","setheading"
     });
   }
   window.__tinker_turtle_render = renderTurtle;
+
+  /* Interactive turtle: scr.listen() asks the canvas to capture keys. Tk key
+     names differ from browser ones, so translate before dispatching back. */
+  let turtleListening = false;
+  const TK_KEYS = {
+    ArrowLeft: "Left", ArrowRight: "Right", ArrowUp: "Up", ArrowDown: "Down",
+    " ": "space", Enter: "Return", Escape: "Escape", Backspace: "BackSpace", Tab: "Tab"
+  };
+  function turtleKeyName(e) { return TK_KEYS[e.key] || e.key; }
+  function pyDispatch(fn, arg) {
+    if (!pyodide || !pyReady) return;
+    try {
+      pyodide.runPython(
+        "import sys\n_m = sys.modules.get('turtle')\nif _m: _m." + fn + "(" + arg + ")");
+    } catch (err) { writeErr(String((err && err.message) || err) + "\n"); }
+  }
+  function enableTurtleInput() {
+    turtleListening = true;
+    const host = $("canvas-host");
+    if (!host) return;
+    host.setAttribute("tabindex", "0");
+    host.classList.add("listening");
+    showPane("canvas");
+    setTimeout(() => { try { host.focus(); } catch (e) {} }, 0);
+  }
+  window.__tinker_turtle_listen = enableTurtleInput;
+
+  function initTurtleInput() {
+    const host = $("canvas-host");
+    if (!host) return;
+    host.addEventListener("keydown", (e) => {
+      if (!turtleListening) return;
+      const name = turtleKeyName(e);
+      // don't let arrows/space scroll the panel while a program is listening
+      if (["Left","Right","Up","Down","space"].indexOf(name) >= 0) e.preventDefault();
+      pyDispatch("_dispatch_key", JSON.stringify(name));
+    });
+    host.addEventListener("click", (e) => {
+      if (!turtleListening) return;
+      const cv = $("turtle-canvas"), r = cv.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      const W = cv.width / (window.devicePixelRatio || 1);
+      const H = cv.height / (window.devicePixelRatio || 1);
+      const x = (e.clientX - r.left) / r.width * W - W / 2;
+      const y = H / 2 - (e.clientY - r.top) / r.height * H;
+      pyDispatch("_dispatch_click", x.toFixed(1) + "," + y.toFixed(1));
+    });
+  }
 
   /* ======================= state ======================= */
   let ws = null;                 // { projects: {name:{type,files:{}}}, active }
@@ -1435,9 +1592,9 @@ files:
   function showSettings() {
     const proj = activeProject();
     if (!proj) {
-      openModal("Settings", "Create a project first — run settings are per project.",
-        '<p style="font-size:12.5px;color:var(--dim);margin:0">Nothing to configure yet.</p>',
-        () => true, () => { $("modal-ok").textContent = "Close"; });
+      openModal("Settings", "Run settings appear once you have a project open.",
+        '<p style="font-size:12.5px;color:var(--dim);margin:0">No project open yet.</p>' + BACKUP_HTML,
+        () => true, () => { $("modal-ok").textContent = "Close"; wireBackup(); });
       return;
     }
     const cands = runnableFiles(proj);
@@ -1458,6 +1615,11 @@ files:
         fileOpts +
       '</select>' +
       '<p style="margin:14px 0 0;font-size:11.5px;color:var(--faint)">Turtle is built in: if any file imports turtle, Run draws to the Canvas panel automatically.</p>' +
+      '<label>Python packages \u2014 ' + escapeHtml(ws.active) + '</label>' +
+      '<input type="text" id="st-pkgs" spellcheck="false" placeholder="e.g. requests, rich" value="' +
+        escapeHtml(projectPackages(proj).join(", ")) + '" />' +
+      '<div style="font-size:11.5px;color:var(--faint);margin-top:6px">Installed from PyPI before each run. Browser Python can only use pure-Python packages \u2014 anything needing a real terminal or OS access (readchar, curses, pygame) won\'t work here; use a cloud project for those.</div>' +
+      BACKUP_HTML +
       '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
         '<label style="margin-top:0">Danger zone</label>' +
         '<button class="btn danger" id="st-delete">Delete "' + escapeHtml(ws.active) + '"</button>' +
@@ -1466,11 +1628,17 @@ files:
       () => {
         settings.alwaysAsk = (mode === "ask");
         activeProject().mainFile = $("st-main").value || null;
+        const pk = $("st-pkgs");
+        if (pk) {
+          activeProject().packages = (pk.value || "").split(",")
+            .map((x) => x.trim()).filter(Boolean);
+        }
         scheduleSave();
         return true;
       },
       () => {
         $("modal-ok").textContent = "Save";
+        wireBackup();
         const c = $("st-mode");
         c.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
           c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
@@ -1671,6 +1839,10 @@ except Exception:
       outTarget = target;
     }
     syncProjectToFS();
+    await ensurePackages(proj, target);
+    outTarget = target;
+    turtleListening = false;
+    const chost = $("canvas-host"); if (chost) chost.classList.remove("listening");
     if (turtleMode) { try { installTurtleModule(); } catch (e) { writeErr("Couldn't install turtle module: " + e + "\n"); } }
     pyodide.globals.set("__run_target__", path);
     try { await pyodide.runPythonAsync(RUN_WRAPPER); }
@@ -1683,6 +1855,56 @@ except Exception:
     try { pyodide.globals.delete("__run_target__"); } catch (e) {}
   }
 
+  /* Packages a project needs from PyPI. Pyodide can install any pure-Python
+     wheel (and the C ones Pyodide itself ships) through micropip. The list is
+     stored per project, so it survives reloads and syncs with the workspace. */
+  const installedPkgs = {};
+  function projectPackages(proj) {
+    const prof = profileOf(proj);
+    const fromProfile = (prof.run && prof.run.packages) || [];
+    const fromProject = (proj && proj.packages) || [];
+    const seen = {}, out = [];
+    fromProfile.concat(fromProject).forEach((p) => {
+      const n = String(p || "").trim();
+      if (n && !seen[n]) { seen[n] = 1; out.push(n); }
+    });
+    return out;
+  }
+  async function ensurePackages(proj, target) {
+    const want = projectPackages(proj).filter((p) => !installedPkgs[p]);
+    if (!want.length) return true;
+    const say = (m, err) => {
+      if (target === "terminal") termPrint(m, err ? "err" : "muted");
+      else appendConsole(m + "\n", !!err);
+    };
+    if (!micropipLoaded) {
+      say("Loading package installer\u2026");
+      try { await pyodide.loadPackage("micropip"); micropipLoaded = true; }
+      catch (e) { say("Couldn't load micropip: " + ((e && e.message) || e), true); return false; }
+    }
+    let allOk = true;
+    for (const pkg of want) {
+      say("Installing " + pkg + "\u2026");
+      try {
+        await pyodide.runPythonAsync("import micropip\nawait micropip.install(" + JSON.stringify(pkg) + ")");
+        installedPkgs[pkg] = true;
+      } catch (e) {
+        allOk = false;
+        const raw = String((e && e.message) || e);
+        say("Couldn't install " + pkg + " \u2014 " + shortPipError(raw), true);
+      }
+    }
+    return allOk;
+  }
+  // micropip errors are enormous; surface the one line that explains it.
+  function shortPipError(raw) {
+    if (/Can't find a pure Python 3 wheel/i.test(raw))
+      return "no pure-Python wheel on PyPI, so it can't run in the browser. Try a cloud project instead.";
+    if (/Can't fetch metadata|404/i.test(raw)) return "no package by that name on PyPI.";
+    const line = raw.split("\n").filter((l) => l.trim()).pop() || raw;
+    return line.slice(0, 160);
+  }
+
   async function pipInstall(pkgs) {
     await ensurePyodide();
     if (!micropipLoaded) { termNote("Loading micropip…"); await pyodide.loadPackage("micropip"); micropipLoaded = true; }
@@ -1690,6 +1912,12 @@ except Exception:
       termPrint("Collecting " + p + "…", "muted");
       try {
         await pyodide.runPythonAsync("import micropip\nawait micropip.install(" + JSON.stringify(p) + ")");
+        installedPkgs[p] = true;
+        const proj = activeProject();
+        if (proj) {                       // remember it so the next run reinstalls it
+          if (!proj.packages) proj.packages = [];
+          if (proj.packages.indexOf(p) < 0) { proj.packages.push(p); scheduleSave(); }
+        }
         termPrint("Successfully installed " + p, "ok");
       } catch (e) {
         const msg = String((e && e.message) || e).split("\n").slice(-6).join("\n");
@@ -2000,56 +2228,89 @@ except Exception:
     try {
       const { data, error } = await sb.from("workspaces").select("data").eq("user_id", user.id).maybeSingle();
       if (error) throw error;
-      if (data && data.data && data.data.projects && Object.keys(data.data.projects).length) {
-        askCloudMerge(data.data);
-      } else {
-        pushCloud();
-      }
+      // Sync silently: pull anything new down, then push the merged result.
+      if (data && data.data) mergeProjects(data.data);
+      pushCloud();
     } catch (e) { console.warn("cloud pull failed", e); }
   }
 
-  function askCloudMerge(cloud) {
-    const cloudNames = Object.keys(cloud.projects);
-    const localNames = Object.keys(ws.projects);
-    openModal(
-      "You have projects in the cloud",
-      "Pick which set to keep. The other is replaced, so choose carefully.",
-      '<div class="chips" id="cm-chips" style="flex-wrap:wrap">' +
-        '<div class="chip sel" data-c="cloud">Use cloud<small>' + cloudNames.length + ' project(s)</small></div>' +
-        '<div class="chip" data-c="local">Keep this device<small>' + localNames.length + ' project(s)</small></div>' +
-      '</div>' +
-      '<p style="margin:12px 0 0;font-size:11.5px;color:var(--faint)">Cloud: ' + escapeHtml(cloudNames.join(", ")) + '<br>This device: ' + escapeHtml(localNames.join(", ")) + '</p>',
-      () => {
-        const pick = $("cm-chips").querySelector(".chip.sel").dataset.c;
-        if (pick === "cloud") {
-          ws.projects = cloud.projects;
-          ws.active = cloud.active in cloud.projects ? cloud.active : Object.keys(cloud.projects)[0];
-          if (cloud.runtimes && typeof cloud.runtimes === "object") ws.runtimes = cloud.runtimes;
-          if (cloud.ghCfg && typeof cloud.ghCfg === "object") ws.ghCfg = cloud.ghCfg;
-          if (cloud.customProfiles) {
-            Object.keys(cloud.customProfiles).forEach((id) => {
-              try { registerProfile(parseProfile(cloud.customProfiles[id]), true, cloud.customProfiles[id]); } catch (e) {}
-            });
-          }
-          session.open = {}; session.current = {};
-          const first = Object.keys(activeProject().files)[0];
-          session.open[ws.active] = first ? [first] : [];
-          session.current[ws.active] = first || null;
-          renderProjectPicker(); renderSidebar(); renderTabs();
-          if (first) openFile(first); else showEditorEmpty();
-          doSave();
-        } else { pushCloud(); }
-        return true;
-      },
-      () => {
-        $("modal-ok").textContent = "Continue";
-        const c = $("cm-chips");
-        c.querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
-          c.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
-          el.classList.add("sel");
-        }));
+  /* Merge without ever destroying anything: unseen projects are added, identical
+     ones skipped, and a real conflict lands *beside* the original instead of
+     replacing it. Non-destructive is what lets this happen silently. */
+  function mergeProjects(src) {
+    if (!src || !src.projects) return 0;
+    const sig = (p) => JSON.stringify((p && p.files) || {});
+    let added = 0;
+    Object.keys(src.projects).forEach((name) => {
+      const incoming = src.projects[name];
+      const mine = ws.projects[name];
+      if (!mine) { ws.projects[name] = incoming; added++; return; }
+      if (sig(mine) === sig(incoming)) return;          // same thing, nothing to do
+      let alt = name + "-copy", i = 2;
+      while (ws.projects[alt]) alt = name + "-copy-" + (i++);
+      ws.projects[alt] = incoming; added++;
+    });
+    if (src.customProfiles) {
+      Object.keys(src.customProfiles).forEach((id) => {
+        if (profiles[id]) return;
+        try { registerProfile(parseProfile(src.customProfiles[id]), true, src.customProfiles[id]); }
+        catch (e) { /* skip anything that no longer parses */ }
+      });
+    }
+    if (src.runtimes) ws.runtimes = Object.assign({}, src.runtimes, ws.runtimes || {});
+    if (src.ghCfg)   ws.ghCfg   = Object.assign({}, src.ghCfg,   ws.ghCfg   || {});
+    if (src.cloudOK) ws.cloudOK = Object.assign({}, src.cloudOK, ws.cloudOK || {});
+    if (added) {
+      if (!ws.active || !ws.projects[ws.active]) {
+        const first = Object.keys(ws.projects)[0];
+        if (first) switchProject(first);
       }
-    );
+      renderProjectPicker(); renderSidebar(); renderTabs();
+      doSave();
+    }
+    return added;
+  }
+
+  /* ---- backup: export / import ---- */
+  function exportWorkspace() {
+    const payload = {
+      tinker: 1, exported: new Date().toISOString(),
+      projects: ws.projects, customProfiles: customProfileYaml,
+      settings: settings, runtimes: ws.runtimes || {}
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tinker-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 8000);
+  }
+  function importWorkspace(file) {
+    const rd = new FileReader();
+    rd.onload = () => {
+      let data = null;
+      try { data = JSON.parse(rd.result); }
+      catch (e) { flashConsole("That doesn't look like a Tinker backup \u2014 it isn't valid JSON.", true); return; }
+      if (!data || !data.projects || !Object.keys(data.projects).length) {
+        flashConsole("That backup has no projects in it.", true); return;
+      }
+      const n = mergeProjects(data);
+      flashConsole(n ? ("Imported " + n + " project" + (n === 1 ? "" : "s") + ".")
+                     : "Nothing new \u2014 everything in that backup was already here.", false);
+    };
+    rd.onerror = () => flashConsole("Couldn't read that file.", true);
+    rd.readAsText(file);
+  }
+  const BACKUP_HTML =
+    '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">' +
+      '<label style="margin-top:0">Backup</label>' +
+      '<button class="btn" id="st-export">Export everything</button> ' +
+      '<button class="btn" id="st-import">Import a backup</button>' +
+      '<div style="font-size:11.5px;color:var(--faint);margin-top:8px">Saves every project and installed profile to one file. Importing merges it in \u2014 nothing you already have is overwritten.</div>' +
+    '</div>';
+  function wireBackup() {
+    const ex = $("st-export"); if (ex) ex.addEventListener("click", exportWorkspace);
+    const im = $("st-import"); if (im) im.addEventListener("click", () => $("import-file").click());
   }
 
   function scheduleCloudPush() {
@@ -2392,8 +2653,11 @@ except Exception:
   function b64dec(s) { return decodeURIComponent(escape(atob(String(s).replace(/\s/g, "")))); }
   function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
   function newRunToken() {
-    const a = new Uint8Array(5); crypto.getRandomValues(a);
-    return Array.from(a).map((b) => b.toString(16).padStart(2, "0")).join("") + Date.now().toString(36);
+    const a = new Uint8Array(4); crypto.getRandomValues(a);
+    // Timestamp FIRST (base36, 8 chars until 2059) so the runner can tell how
+    // old a run folder is from its name alone and prune finished runs without
+    // ever touching someone else's in-flight one.
+    return Date.now().toString(36) + Array.from(a).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
   /* ---- connect ---- */
@@ -3059,6 +3323,11 @@ except Exception:
     $("files-btn").addEventListener("click", toggleDrawer);
     $("menu-btn").addEventListener("click", showMobileMenu);
     $("side-scrim").addEventListener("click", () => setDrawer(false));
+    $("import-file").addEventListener("change", (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) importWorkspace(f);
+      e.target.value = "";                      // let the same file be picked again
+    });
     $("del-proj-btn").addEventListener("click", () => { if (ws.active) deleteProject(ws.active); });
     document.querySelectorAll(".ptab").forEach((t) => t.addEventListener("click", () => showPane(t.dataset.pane)));
     $("modal-scrim").addEventListener("mousedown", (e) => { if (e.target === $("modal-scrim")) closeModal(); });
@@ -3081,6 +3350,7 @@ except Exception:
     setSaveState(persistOK ? "saved" : "blocked");
     try { initTerminal(); } catch (e) { console.error("terminal failed to load", e); }
     initDivider();
+    initTurtleInput();
     wireEvents();
     try { initMonaco(); }
     catch (e) {
